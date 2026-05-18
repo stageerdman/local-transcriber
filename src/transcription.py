@@ -1,30 +1,26 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 
-def ensure_faster_whisper_available() -> None:
+def ensure_mlx_whisper_available() -> None:
     try:
-        import faster_whisper  # noqa: F401
+        import mlx_whisper  # noqa: F401
     except ImportError as exc:
         raise RuntimeError(
-            "faster-whisper is not installed. Run: pip install -r requirements.txt"
+            "mlx-whisper is not installed. Run: pip install -r requirements.txt"
         ) from exc
 
 
-def create_model(model_name: str = "medium") -> Any:
-    ensure_faster_whisper_available()
-    from faster_whisper import WhisperModel
+def transcribe_mp3(model_name: str, audio_path: Path, language: str = "en") -> str:
+    ensure_mlx_whisper_available()
+    import mlx_whisper
 
-    return WhisperModel(model_name, device="cpu", compute_type="int8")
-
-
-def transcribe_mp3(model: Any, audio_path: Path, language: str = "en") -> str:
-    segments, _info = model.transcribe(
+    result = mlx_whisper.transcribe(
         str(audio_path),
+        path_or_hf_repo=model_name,
         language=language,
-        vad_filter=True,
+        verbose=False,
     )
-    lines = [segment.text.strip() for segment in segments if segment.text.strip()]
-    return "\n".join(lines).strip() + ("\n" if lines else "")
+    text = result.get("text", "").strip()
+    return text + ("\n" if text else "")

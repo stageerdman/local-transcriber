@@ -10,10 +10,10 @@ from src.folder_picker import pick_folder
 from src.media_finder import find_media_files
 from src.naming import build_base_name, unique_base_name
 from src.report import TranscriptionReport
-from src.transcription import create_model, ensure_faster_whisper_available, transcribe_mp3
+from src.transcription import ensure_mlx_whisper_available, transcribe_mp3
 
 
-MODEL_NAME = "medium"
+MODEL_NAME = "mlx-community/whisper-small-mlx"
 DOWNLOADS_TRANSCRIPTS = Path.home() / "Downloads" / "transcripts"
 
 
@@ -45,7 +45,7 @@ def main() -> int:
         return 1
 
     try:
-        ensure_faster_whisper_available()
+        ensure_mlx_whisper_available()
     except RuntimeError as exc:
         print(f"ERROR: {exc}")
         return 1
@@ -75,15 +75,8 @@ def main() -> int:
         print(f"Report written: {run_folder / 'transcription_report.json'}")
         return 0
 
-    print(f"Loading faster-whisper model: {MODEL_NAME}")
-    try:
-        model = create_model(MODEL_NAME)
-    except Exception as exc:
-        report.finish()
-        report.write(run_folder / "transcription_report.json")
-        print(f"ERROR: Failed to load model: {exc}")
-        print(f"Report written: {run_folder / 'transcription_report.json'}")
-        return 1
+    print(f"Using mlx-whisper model: {MODEL_NAME}")
+    print("The first run may download/cache the model locally.")
 
     used_names: set[str] = set()
     for index, media_file in enumerate(media_files, start=1):
@@ -101,7 +94,7 @@ def main() -> int:
             prepare_mp3(media_file, audio_output_path)
 
             print(f"Transcribing: {audio_output_path}")
-            transcript_text = transcribe_mp3(model, audio_output_path, language="en")
+            transcript_text = transcribe_mp3(MODEL_NAME, audio_output_path, language="en")
             transcript_output_path.write_text(transcript_text, encoding="utf-8")
             print(f"Saved transcript: {transcript_output_path}")
 

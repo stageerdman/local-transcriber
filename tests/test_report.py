@@ -10,7 +10,7 @@ def test_report_writes_valid_json_with_success_and_error_entries(tmp_path: Path)
         output_folder="/output",
         started_at="2026-05-18T14:30:00",
         finished_at=None,
-        model_used="medium",
+        model_used="mlx-community/whisper-small-mlx",
         total_files_found=2,
     )
     report.add_success(Path("/input/a.mp3"), Path("/output/audio/a.mp3"), Path("/output/text/a.txt"))

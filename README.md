@@ -2,7 +2,7 @@
 
 A standalone local Mac transcription tool for folders of English sales calls.
 
-It opens a Finder-style folder picker, recursively finds supported audio/video files, converts non-MP3 files to MP3 with `ffmpeg`, transcribes locally with `faster-whisper`, and writes clean text transcripts into a timestamped folder under:
+It opens a Finder-style folder picker, recursively finds supported audio/video files, converts non-MP3 files to MP3 with `ffmpeg`, transcribes locally with `mlx-whisper` on Apple Silicon/Metal, and writes clean text transcripts into a timestamped folder under:
 
 ```text
 ~/Downloads/transcripts/YYYY-MM-DD_HH-MM-SS/
@@ -71,7 +71,7 @@ pip install -r requirements.txt
 chmod +x run_transcriber.command
 ```
 
-The first transcription may take longer because `faster-whisper` downloads the local `medium` model files.
+The first transcription may take longer because `mlx-whisper` downloads the local model files.
 
 ## Launching
 
@@ -87,16 +87,14 @@ The launcher activates `.venv` if it exists, starts the Python script, and keeps
 
 - Opens a macOS folder picker.
 - Checks that `ffmpeg` is installed.
-- Checks that `faster-whisper` is importable.
+- Checks that `mlx-whisper` is importable.
 - Finds supported media files recursively.
 - Copies existing MP3s into the run `audio/` folder.
 - Converts video and non-MP3 audio to MP3 into the run `audio/` folder.
 - Transcribes locally with:
-  - model: `medium`
+  - model: `mlx-community/whisper-small-mlx`
   - language: English
-  - `device="cpu"`
-  - `compute_type="int8"`
-  - `vad_filter=True`
+- Uses Apple Silicon/Metal acceleration through MLX.
 - Writes clean text only, without timestamps.
 - Continues processing if one file fails.
 - Writes `transcription_report.json` at the end.
