@@ -12,7 +12,7 @@ def ensure_mlx_whisper_available() -> None:
         ) from exc
 
 
-def transcribe_mp3(model_name: str, audio_path: Path, language: str = "en") -> str:
+def transcribe_mp3(model_name: str, audio_path: Path, language: str | None = None) -> str:
     ensure_mlx_whisper_available()
     import mlx_whisper
 

@@ -16,9 +16,9 @@ else
   echo "No .venv found. Using system python3."
 fi
 
-echo "Starting transcriber..."
+echo "Starting Local Transcriber..."
 echo
-python3 transcriber.py
+python3 -m app.main
 STATUS=$?
 
 echo

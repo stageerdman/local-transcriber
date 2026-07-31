@@ -1,14 +1,14 @@
 # Local Transcriber
 
-A standalone local Mac transcription tool for folders of English sales calls.
+A local Mac app for transcribing sales calls (and any other audio/video) entirely offline.
 
-It opens a Finder-style folder picker, recursively finds supported audio/video files, converts non-MP3 files to MP3 with `ffmpeg`, transcribes locally with `mlx-whisper` on Apple Silicon/Metal, and writes clean text transcripts into a timestamped folder under:
+Open it from Finder/Spotlight, add a file or a whole folder, pick a model and language, and it
+converts, transcribes locally with `mlx-whisper` on Apple Silicon/Metal, and writes a clean
+`.md` transcript **next to each source file**. It tracks every transcription in a local history
+and uses that history to predict how long the next one will take — the more you use it, the
+more accurate the estimate gets.
 
-```text
-~/Downloads/transcripts/YYYY-MM-DD_HH-MM-SS/
-```
-
-No OpenAI API, no cloud service, no database, and no server are used.
+No OpenAI API, no cloud service, and no external server are used.
 
 ## Supported Files
 
@@ -20,43 +20,75 @@ No OpenAI API, no cloud service, no database, and no server are used.
 - `.mkv`
 - `.webm`
 
-## Output Structure
+## Models & Languages
 
-Each run creates:
+Pick a model per run from the dropdown:
+
+| Label | Repo | Notes |
+|---|---|---|
+| Tiny | `mlx-community/whisper-tiny-mlx` | fastest, lowest accuracy |
+| Base | `mlx-community/whisper-base-mlx` | |
+| Small (default) | `mlx-community/whisper-small-mlx` | good balance for English |
+| Medium | `mlx-community/whisper-medium-mlx` | recommended for Czech and other non-English audio |
+| Large-v3 | `mlx-community/whisper-large-v3-mlx` | best accuracy, slowest |
+| Large-v3-turbo | `mlx-community/whisper-large-v3-turbo` | fast + accurate |
+
+Language dropdown: Auto-detect, English, Czech, Slovak, German. The first transcription with a
+model you haven't used before downloads/caches it locally via Hugging Face — that download time
+is one-off and not representative of normal transcription speed (see the note on estimates
+below).
+
+## Output
+
+Each transcribed file gets a Markdown transcript written next to it:
 
 ```text
-~/Downloads/transcripts/YYYY-MM-DD_HH-MM-SS/
-  text/
-  audio/
-  transcription_report.json
+SelectedFolder/Alex/call.mp4
+SelectedFolder/Alex/call.md      <- written here
 ```
 
-Output filenames are flat and based on the relative parent folders plus the original file stem.
+The `.md` file has a small frontmatter block followed by the plain-text transcript:
 
-Example:
+```markdown
+---
+source: call.mp4
+model: mlx-community/whisper-small-mlx
+language: en
+transcribed_at: 2026-07-31T10:00:00
+elapsed_seconds: 612
+---
 
-```text
-SelectedFolder/Alex/call.mp3
+<transcript text>
 ```
 
-becomes:
+If a `.md` with that name already exists (e.g. two same-named files with different extensions in
+one folder), it's written as `call (2).md`, `call (3).md`, etc.
+
+Audio conversion to mp3 (for non-mp3 inputs) happens in a temporary directory and is cleaned up
+after each transcription — it's an internal step, not an output.
+
+## Time Estimates
+
+Before each file starts transcribing, the app shows an estimated time based on the file's audio
+duration and the average speed of past successful transcriptions with the same model (falling
+back to the same model regardless of language, then to a rough built-in default if you've never
+used that model before). Every completed transcription is recorded, so the estimate keeps
+improving the more you use the app. The first run of a brand-new model will look slow in history
+because it includes the one-time download — later runs pull the average back down.
+
+## History
+
+The **History** tab lists every past transcription: date, file, model, language, audio duration,
+processing time, and status. It's backed by a local SQLite database at:
 
 ```text
-~/Downloads/transcripts/2026-05-18_14-30-00/text/Alex - call.txt
-~/Downloads/transcripts/2026-05-18_14-30-00/audio/Alex - call.mp3
+~/Library/Application Support/LocalTranscriber/history.db
 ```
 
-Deeper example:
+Your last-used model/language selection is remembered in:
 
 ```text
-SelectedFolder/Sales Calls/Alex/call.mp4
-```
-
-becomes:
-
-```text
-Sales Calls - Alex - call.txt
-Sales Calls - Alex - call.mp3
+~/Library/Application Support/LocalTranscriber/settings.json
 ```
 
 ## Mac Setup
@@ -68,46 +100,68 @@ brew install ffmpeg
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-chmod +x run_transcriber.command
 ```
 
-The first transcription may take longer because `mlx-whisper` downloads the local model files.
+The first transcription with a given model may take longer because `mlx-whisper` downloads the
+model files.
 
-## Launching
+## Running the App
 
-Double-click:
+**As an installed app (recommended):**
 
-```text
-run_transcriber.command
+```bash
+./scripts/build_app.sh
 ```
 
-The launcher activates `.venv` if it exists, starts the Python script, and keeps Terminal open at the end so you can read the result.
+This runs the test suite, then builds and installs `LocalTranscriber.app` into `/Applications`
+(override the destination with `APP_INSTALL_DIR=~/Applications ./scripts/build_app.sh`). Launch
+it from Finder or Spotlight like any other app — no Terminal window. Re-run this script any time
+you change the code; the launcher always runs the current code in this project directory, so most
+of the time you don't even need to rebuild, but re-running keeps the version stamp current.
+
+**For development, without installing:**
+
+```bash
+source .venv/bin/activate
+python3 -m app.main
+```
+
+Or double-click `run_transcriber.command`, which activates `.venv` and starts the app the same
+way, keeping a Terminal window open so you can see logs.
 
 ## Runtime Behavior
 
-- Opens a macOS folder picker.
-- Checks that `ffmpeg` is installed.
-- Checks that `mlx-whisper` is importable.
-- Finds supported media files recursively.
-- Copies existing MP3s into the run `audio/` folder.
-- Converts video and non-MP3 audio to MP3 into the run `audio/` folder.
-- Transcribes locally with:
-  - model: `mlx-community/whisper-small-mlx`
-  - language: English
-- Uses Apple Silicon/Metal acceleration through MLX.
+- Opens a native macOS file/folder picker — "Add File..." for one or more files, "Add Folder..."
+  to recursively queue every supported file inside it.
+- Checks that `ffmpeg` is installed and `mlx-whisper` is importable, showing a banner if either is
+  missing (rather than exiting).
+- Processes queued files **one at a time** in the background (local Metal transcription is
+  GPU-bound, so parallel jobs wouldn't be faster) while the UI stays responsive.
+- Continues to the next file if one fails; the failure and its error are recorded in History.
 - Writes clean text only, without timestamps.
-- Continues processing if one file fails.
-- Writes `transcription_report.json` at the end.
 
-## Manual Test Checklist
+## Architecture
 
-1. Put one MP3 into a test folder.
-2. Launch `run_transcriber.command`.
-3. Select the test folder.
-4. Confirm output appears in `~/Downloads/transcripts/<timestamp>/text/`.
-5. Put one MP4 into a test folder.
-6. Confirm MP3 appears in `audio/` and TXT appears in `text/`.
-7. Confirm `transcription_report.json` exists.
+```text
+app/
+  main.py       entry point: builds the Tk window, starts the background worker
+  ui.py          MainWindow: Transcribe tab (add files/folder, model+language, live queue)
+                 and History tab
+  worker.py       background thread: probe duration -> estimate -> convert -> transcribe
+                  -> write .md -> record history
+  jobs.py          Job / WorkerEvent dataclasses passed between the UI and the worker thread
+src/
+  converter.py      ffmpeg mp3 conversion
+  media_finder.py     recursive supported-file discovery
+  file_pickers.py      native file/folder picker dialogs
+  transcription.py      mlx-whisper wrapper
+  duration.py             ffprobe-based audio/video duration probing
+  history_db.py            SQLite history storage + time estimation
+  md_writer.py              writes the .md transcript next to the source file
+  catalog.py                 model/language choices + default speed-estimate table
+scripts/
+  build_app.sh                builds and installs the .app bundle
+```
 
 ## Running Automated Tests
 
@@ -116,4 +170,5 @@ source .venv/bin/activate
 pytest
 ```
 
-The automated tests cover filename generation, recursive media discovery, and report JSON generation.
+Covers media discovery, `.md` writing (including filename collisions), duration probing, and the
+history/estimation logic (including that estimates improve once real history exists).
