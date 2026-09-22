@@ -1,7 +1,15 @@
 from __future__ import annotations
 
 import queue
-import tkinter as tk
+
+try:
+    from tkinterdnd2 import TkinterDnD
+
+    _TK_ROOT_CLS = TkinterDnD.Tk
+except ImportError:
+    import tkinter as tk
+
+    _TK_ROOT_CLS = tk.Tk
 
 from app.jobs import Job, WorkerEvent
 from app.ui import MainWindow
@@ -18,7 +26,7 @@ def main() -> int:
     worker = TranscriptionWorker(job_queue, event_queue, db_conn)
     worker.start()
 
-    root = tk.Tk()
+    root = _TK_ROOT_CLS()
     MainWindow(root, job_queue, event_queue, db_conn)
 
     def on_close() -> None:

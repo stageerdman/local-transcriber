@@ -5,6 +5,10 @@ set -u
 SCRIPT_DIR="${0:A:h}"
 cd "$SCRIPT_DIR" || exit 1
 
+# Belt-and-suspenders: make sure Homebrew's ffmpeg/ffprobe are found even if
+# this isn't a login shell with Homebrew's shellenv already sourced.
+export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:$PATH"
+
 echo "Local Transcriber"
 echo "Project folder: $SCRIPT_DIR"
 echo

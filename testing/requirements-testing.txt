@@ -1,0 +1,7 @@
+# Extra deps for the benchmark harness on top of local-transcriber's own
+# requirements.txt (mlx-whisper, parakeet-mlx). Install into the same venv:
+#
+#   local-transcriber/.venv/bin/pip install -r requirements-testing.txt
+
+silicon-asr   # Apple Neural Engine (CoreML) Parakeet runners
+groq          # Groq API client (Whisper Large-v3 / Large-v3-turbo on Groq's LPUs)

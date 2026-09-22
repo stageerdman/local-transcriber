@@ -1,0 +1,7 @@
+videos/*
+!videos/.gitkeep
+results/audio/*
+results/transcripts/*
+results/results.json
+!results/audio/.gitkeep
+!results/transcripts/.gitkeep

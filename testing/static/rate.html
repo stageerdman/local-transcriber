@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Transcription Benchmark</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #ffffff;
+    --fg: #1a1a1a;
+    --muted: #6b7280;
+    --card: #f7f7f8;
+    --border: #e2e2e6;
+    --accent: #2563eb;
+    --star: #d1d5db;
+    --star-on: #f59e0b;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16161a;
+      --fg: #eaeaea;
+      --muted: #9aa0aa;
+      --card: #1f1f24;
+      --border: #303038;
+      --accent: #60a5fa;
+      --star: #4b4b55;
+      --star-on: #f5b942;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--fg);
+    padding: 2rem;
+  }
+  h1 { font-size: 1.4rem; margin-bottom: 0.25rem; }
+  .meta { color: var(--muted); margin-bottom: 1.5rem; font-size: 0.9rem; }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
+    gap: 1rem;
+  }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1rem 1.1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+  }
+  .card.error { border-color: #dc2626; }
+  .card h2 {
+    font-size: 1.05rem;
+    margin: 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 0.5rem;
+  }
+  .engine-tag {
+    font-size: 0.7rem;
+    color: var(--muted);
+    font-weight: normal;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 1rem;
+    font-size: 0.82rem;
+    color: var(--muted);
+  }
+  .stats strong { color: var(--fg); }
+  .transcript {
+    max-height: 220px;
+    overflow-y: auto;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.6rem 0.7rem;
+    font-size: 0.86rem;
+    line-height: 1.4;
+    white-space: pre-wrap;
+  }
+  .rating-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: auto;
+  }
+  .stars { font-size: 1.4rem; cursor: pointer; letter-spacing: 0.1rem; }
+  .stars span { color: var(--star); }
+  .stars span.on { color: var(--star-on); }
+  .rating-label { font-size: 0.8rem; color: var(--muted); min-width: 4.5rem; }
+  textarea.notes {
+    width: 100%;
+    resize: vertical;
+    min-height: 2.2rem;
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 0.4rem 0.5rem;
+    font-size: 0.82rem;
+    font-family: inherit;
+  }
+  .saved-flash { color: #16a34a; font-size: 0.75rem; opacity: 0; transition: opacity 0.3s; }
+  .saved-flash.show { opacity: 1; }
+  .error-msg { color: #dc2626; font-size: 0.85rem; }
+  .empty { color: var(--muted); }
+  .rank-badge {
+    display: inline-block;
+    font-size: 0.7rem;
+    padding: 0.1rem 0.45rem;
+    border-radius: 999px;
+    background: var(--accent);
+    color: white;
+    margin-left: 0.4rem;
+  }
+</style>
+</head>
+<body>
+  <h1>Transcription Benchmark</h1>
+  <div class="meta" id="meta">Loading…</div>
+  <div class="grid" id="grid"></div>
+
+  <script>
+    const RATING_LABELS = ["", "Poor", "Fair", "Okay", "Good", "Excellent"];
+
+    function fmtSeconds(s) {
+      if (s === null || s === undefined) return "—";
+      return s.toFixed(1) + "s";
+    }
+
+    function starsHtml(runId, rating) {
+      let html = '<span class="stars" data-run="' + runId + '">';
+      for (let i = 1; i <= 5; i++) {
+        html += '<span class="star" data-value="' + i + '" style="cursor:pointer">' +
+          (rating && i <= rating ? '★' : '☆') + '</span>';
+      }
+      html += '</span>';
+      return html;
+    }
+
+    async function rate(runId, rating) {
+      const res = await fetch("/api/rate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: runId, rating }),
+      });
+      return res.ok;
+    }
+
+    async function saveNotes(runId, notes) {
+      await fetch("/api/rate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: runId, rating: window.__ratings[runId] ?? null, notes }),
+      });
+    }
+
+    function render(data) {
+      window.__ratings = {};
+      const meta = document.getElementById("meta");
+      const grid = document.getElementById("grid");
+      grid.innerHTML = "";
+
+      const runs = Object.values(data.runs || {});
+      if (!data.video) {
+        meta.textContent = "No results yet. Run: python run_benchmark.py <video>";
+        return;
+      }
+      meta.textContent = `${data.video} — audio duration ${fmtSeconds(data.audio_duration_seconds)} — ${runs.length} backend(s)`;
+
+      // Fastest first among successful runs, for a quick visual ranking.
+      const ranked = runs
+        .filter(r => !r.error)
+        .sort((a, b) => (a.transcribe_seconds ?? Infinity) - (b.transcribe_seconds ?? Infinity));
+      const fastestId = ranked[0]?.id;
+
+      runs.sort((a, b) => (a.transcribe_seconds ?? Infinity) - (b.transcribe_seconds ?? Infinity));
+
+      for (const run of runs) {
+        window.__ratings[run.id] = run.rating ?? null;
+        const card = document.createElement("div");
+        card.className = "card" + (run.error ? " error" : "");
+
+        if (run.error) {
+          card.innerHTML = `
+            <h2>${run.label} <span class="engine-tag">${run.engine}</span></h2>
+            <div class="error-msg">Failed: ${run.error}</div>
+          `;
+          grid.appendChild(card);
+          continue;
+        }
+
+        const badge = run.id === fastestId ? '<span class="rank-badge">fastest</span>' : "";
+
+        card.innerHTML = `
+          <h2>${run.label}${badge} <span class="engine-tag">${run.engine}</span></h2>
+          <div class="stats">
+            <span>transcribe: <strong>${fmtSeconds(run.transcribe_seconds)}</strong></span>
+            <span>load: <strong>${fmtSeconds(run.load_seconds)}</strong></span>
+            <span>speed: <strong>${run.speedup_vs_realtime ? run.speedup_vs_realtime + "x realtime" : "—"}</strong></span>
+          </div>
+          <div class="transcript">${(run.transcript_text || "").replace(/[<>&]/g, c => ({"<":"&lt;",">":"&gt;","&":"&amp;"}[c]))}</div>
+          <textarea class="notes" placeholder="Notes (optional)">${run.notes || ""}</textarea>
+          <div class="rating-row">
+            <span class="rating-label" data-label-for="${run.id}">${RATING_LABELS[run.rating || 0] || "Not rated"}</span>
+            ${starsHtml(run.id, run.rating)}
+            <span class="saved-flash" data-flash-for="${run.id}">saved</span>
+          </div>
+        `;
+        grid.appendChild(card);
+      }
+
+      grid.querySelectorAll(".star").forEach(star => {
+        star.addEventListener("click", async (e) => {
+          const wrapper = e.target.closest(".stars");
+          const runId = wrapper.dataset.run;
+          const value = parseInt(e.target.dataset.value, 10);
+          window.__ratings[runId] = value;
+          wrapper.querySelectorAll(".star").forEach((s, i) => {
+            s.textContent = (i + 1) <= value ? "★" : "☆";
+          });
+          document.querySelector(`[data-label-for="${runId}"]`).textContent = RATING_LABELS[value];
+          const ok = await rate(runId, value);
+          const flash = document.querySelector(`[data-flash-for="${runId}"]`);
+          if (ok) {
+            flash.classList.add("show");
+            setTimeout(() => flash.classList.remove("show"), 1200);
+          }
+        });
+      });
+
+      grid.querySelectorAll(".notes").forEach(area => {
+        let timer;
+        area.addEventListener("input", (e) => {
+          clearTimeout(timer);
+          const card = e.target.closest(".card");
+          const runId = card.querySelector(".stars").dataset.run;
+          timer = setTimeout(() => saveNotes(runId, e.target.value), 500);
+        });
+      });
+    }
+
+    async function load() {
+      const res = await fetch("/api/results");
+      const data = await res.json();
+      render(data);
+    }
+
+    load();
+  </script>
+</body>
+</html>

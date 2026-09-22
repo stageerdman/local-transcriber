@@ -9,6 +9,7 @@ MODEL_CHOICES: list[tuple[str, str]] = [
     ("Medium - recommended for Czech", "mlx-community/whisper-medium-mlx"),
     ("Large-v3 - best accuracy, slowest", "mlx-community/whisper-large-v3-mlx"),
     ("Large-v3-turbo - fast + accurate", "mlx-community/whisper-large-v3-turbo"),
+    ("Parakeet TDT v3 - by far the fastest", "mlx-community/parakeet-tdt-0.6b-v3"),
 ]
 
 DEFAULT_MODEL = "mlx-community/whisper-small-mlx"
@@ -33,6 +34,11 @@ DEFAULT_REAL_TIME_FACTOR: dict[str, float] = {
     "mlx-community/whisper-medium-mlx": 0.45,
     "mlx-community/whisper-large-v3-mlx": 0.75,
     "mlx-community/whisper-large-v3-turbo": 0.35,
+    # A different architecture (NVIDIA's TDT, not an encoder-decoder like
+    # Whisper) - real-world reports put it around 60x realtime on Apple
+    # Silicon, well past every Whisper size here. Conservative estimate
+    # until real per-install history exists.
+    "mlx-community/parakeet-tdt-0.6b-v3": 0.05,
 }
 FALLBACK_REAL_TIME_FACTOR = 0.35
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from tkinter import Tk, filedialog
+from tkinter import filedialog
 
 from src.media_finder import SUPPORTED_EXTENSIONS
 
@@ -12,32 +12,21 @@ def _media_filetypes() -> list[tuple[str, str]]:
 
 
 def pick_folder() -> Path | None:
-    root = Tk()
-    root.withdraw()
-    root.update()
-    try:
-        selected = filedialog.askdirectory(
-            title="Select folder containing audio or video files",
-            mustexist=True,
-        )
-    finally:
-        root.destroy()
-
+    # Uses the app's existing Tk root (tkinter's filedialog falls back to the
+    # default root); creating a second Tk() instance alongside a running
+    # mainloop is unsupported and causes crashes/hangs on macOS.
+    selected = filedialog.askdirectory(
+        title="Select folder containing audio or video files",
+        mustexist=True,
+    )
     if not selected:
         return None
     return Path(selected).expanduser().resolve()
 
 
 def pick_files() -> list[Path]:
-    root = Tk()
-    root.withdraw()
-    root.update()
-    try:
-        selected = filedialog.askopenfilenames(
-            title="Select audio or video file(s)",
-            filetypes=_media_filetypes(),
-        )
-    finally:
-        root.destroy()
-
+    selected = filedialog.askopenfilenames(
+        title="Select audio or video file(s)",
+        filetypes=_media_filetypes(),
+    )
     return [Path(path).expanduser().resolve() for path in selected]

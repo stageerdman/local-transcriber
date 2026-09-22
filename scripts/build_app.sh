@@ -7,6 +7,12 @@
 # don't even need to rebuild, but re-running keeps the version stamp and
 # bundle metadata current.
 #
+# The bundle is staged in a throwaway temp directory, not inside the project
+# - a build artifact left sitting in the project tree is itself a real .app
+# bundle, so Spotlight/Launch Services index it as a second, separate app
+# alongside the one actually installed in /Applications. Building outside
+# the project and cleaning up after avoids that entirely.
+#
 # Usage:
 #   ./scripts/build_app.sh              # installs into /Applications
 #   APP_INSTALL_DIR=~/Applications ./scripts/build_app.sh   # install elsewhere
@@ -20,8 +26,10 @@ cd "$PROJECT_DIR"
 APP_NAME="LocalTranscriber"
 BUNDLE_ID="com.local-transcriber.app"
 INSTALL_DIR="${APP_INSTALL_DIR:-/Applications}"
-DIST_DIR="$PROJECT_DIR/dist"
+DIST_DIR="$(mktemp -d)"
+trap 'rm -rf "$DIST_DIR"' EXIT
 BUNDLE_PATH="$DIST_DIR/$APP_NAME.app"
+LOGO_PATH="$PROJECT_DIR/logo.jpg"
 
 if [ ! -f "$PROJECT_DIR/VERSION" ]; then
   echo "ERROR: VERSION file not found in $PROJECT_DIR" >&2
@@ -49,6 +57,23 @@ rm -rf "$BUNDLE_PATH"
 mkdir -p "$BUNDLE_PATH/Contents/MacOS"
 mkdir -p "$BUNDLE_PATH/Contents/Resources"
 
+ICON_PLIST_KEYS=""
+if [ -f "$LOGO_PATH" ]; then
+  echo "Generating app icon from $LOGO_PATH"
+  ICONSET_DIR="$DIST_DIR/AppIcon.iconset"
+  mkdir -p "$ICONSET_DIR"
+  for size in 16 32 128 256 512; do
+    sips -s format png -z "$size" "$size" "$LOGO_PATH" --out "$ICONSET_DIR/icon_${size}x${size}.png" >/dev/null
+    double=$((size * 2))
+    sips -s format png -z "$double" "$double" "$LOGO_PATH" --out "$ICONSET_DIR/icon_${size}x${size}@2x.png" >/dev/null
+  done
+  iconutil -c icns "$ICONSET_DIR" -o "$BUNDLE_PATH/Contents/Resources/AppIcon.icns"
+  ICON_PLIST_KEYS="    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>"
+else
+  echo "No logo.jpg found at $LOGO_PATH - building without a custom icon."
+fi
+
 cat > "$BUNDLE_PATH/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -66,6 +91,7 @@ cat > "$BUNDLE_PATH/Contents/Info.plist" <<PLIST
     <string>$VERSION</string>
     <key>CFBundleExecutable</key>
     <string>$APP_NAME</string>
+$ICON_PLIST_KEYS
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>NSHighResolutionCapable</key>
@@ -81,6 +107,10 @@ cat > "$BUNDLE_PATH/Contents/MacOS/$APP_NAME" <<LAUNCHER
 set -eu
 PROJECT_DIR="$PROJECT_DIR"
 cd "\$PROJECT_DIR"
+# Apps launched via Finder/Spotlight (launchd) get a minimal PATH that does
+# not include Homebrew, so ffmpeg/ffprobe wouldn't be found even though a
+# Terminal shell finds them fine. Add the common Homebrew bin dirs.
+export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:\$PATH"
 if [ -d ".venv" ]; then
   source ".venv/bin/activate"
 fi
