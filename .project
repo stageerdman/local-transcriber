@@ -1,0 +1,43 @@
+---
+name: Local Transcriber
+github: https://github.com/stageerdman/local-transcriber
+visibility: public
+adopted: 2026-09-22
+claude_md_generated: 2026-09-22
+modules: [WORKFLOW, STRUCTURE, CODING, UX]
+secrets: [GROQ_API_KEY]
+---
+
+# Local Transcriber
+
+A **local Mac desktop app** for transcribing sales calls (and any audio/video)
+entirely offline. Drag-and-drop or add files, pick a model per file and a
+global language, and it converts, transcribes on-device with `mlx-whisper`
+(Apple Silicon/Metal), and writes a clean `.md` transcript to `~/Downloads`.
+No cloud, no OpenAI API, no external server. It tracks a local history and uses
+it to predict how long the next transcription will take.
+
+Multi-track sources (e.g. Zoom's per-participant recording) are detected via
+`ffprobe` and transcribed track-by-track into pause-delimited, speaker-labeled
+dialogue blocks (with real `(interrupting)` overlap detection). Single mixed
+tracks stay plain text — no speaker guessing.
+
+Stack: Python + `mlx-whisper` / `parakeet-mlx`, ffmpeg, a native Mac UI. Code
+lives in `src/` (transcription, audio-track handling, dialogue blocking,
+history DB, markdown writer) and `app/` (UI, worker, jobs).
+
+## Layout
+- `src/`, `app/`, `tests/`, `scripts/` — the app.
+- `testing/` — a benchmark harness comparing transcription backends (timing +
+  a rating UI). Shares the app's venv; the only backend needing a secret is
+  Groq (`GROQ_API_KEY`, optional).
+- `updates/` — AI Control update history.
+
+## Secrets
+- `GROQ_API_KEY` — **optional**, only for the Groq benchmark backends in
+  `testing/`. The app itself needs no secrets (fully offline).
+
+## Status
+Adopted under AI Control on 2026-09-22. Flattened from a nested
+`local-transcriber/` folder into the project root and its git history elevated
+here. See `issues.txt` for open items.

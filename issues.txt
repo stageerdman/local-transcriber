@@ -1,0 +1,6 @@
+# Local Transcriber — known issues & TODOs
+
+- [ ] Multi-speaker transcripts: real UI click-through with actual multi-track
+      audio not yet verified end-to-end. Covered by automated tests (32 passing
+      via `pytest` from the project root), but not exercised through the app UI.
+      See updates/2026-09-02 multi-speaker-transcripts - CLOSED/update v1.md.
