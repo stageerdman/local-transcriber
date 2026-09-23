@@ -110,60 +110,81 @@ direction + lag reliably. **Verdict: GO.**
   symmetry on a real recording** before shipping (heavy room reverb spreads the
   peak and may lower true-bleed rho). Mechanism is sound; scalars need real data.
 
-### Phase 1 — Detection module `src/crosstalk.py`
-- [ ] `decode_track_pcm(source, stream_index, channel_index, target_rate)` —
-      ffmpeg `-f f32le` → numpy mono (downsampled; alignment guaranteed by
-      shared container).
-- [ ] `detect_bleed(tracks) -> BleedMap` — directional pairwise map
-      `{contaminated_index: [(source_index, confidence, tier)]}` + per-region
-      gating mask, at a coarse hop.
-- [ ] Reuse/extend `audio_tracks.correlation`; keep the module isolatable with a
-      small explicit interface.
-- [ ] Tests: known synthetic bleed → correct direction/tier; clean tracks →
-      empty map; symmetric heavy overlap → `refuse` tier.
+## ⟳ Plan revision (2026-09-23) — real task is **speaker isolation by subtraction**
+Testing on the user's real recording (see `wiki.md`) showed the actual problem is
+**not** acoustic mic-bleed but a **"contained-voice" mix**: OBS routes the
+computer audio (remote speaker, clean) into its own track **and** into the mic
+track (unity gain, zero lag), so:
+- one track (**C**) = a clean single voice,
+- another (**M**) = C **+** the local speaker,
+- a third (**s2**) ≈ M (duplicate mix).
 
-### Phase 2 — Gating application
-- [ ] `apply_gate(pcm, mask) -> pcm` and a writer that renders the cleaned track
-      to a temp wav/mp3 for the transcriber (keeps the existing
-      "engine takes a file path" contract).
-- [ ] Tests: mask muting is exact; **source file untouched**; unaffected tracks
-      pass through byte-for-byte-equivalent.
+The fix that "does it right" is: **keep C as one speaker, isolate `M − C` as the
+other, drop the duplicate.** This subsumes the user's "fix duplicates AND finish
+bleed" ask. The Phase-0 acoustic-bleed detector/gating is retained as a secondary
+regime (no real recording needs it yet), but the **primary** path below is
+subtraction. Phases 1–6 are re-scoped accordingly; Phase 0 stays valid (its
+lagged-xcorr direction test is reused by the classifier).
+
+### Phase 1 — Track-relationship classifier `src/track_separation.py`
+- [ ] `decode_track_pcm(source, stream_index, channel_index, rate)` — ffmpeg
+      `-f f32le` → numpy mono (alignment guaranteed by shared container).
+- [ ] `classify_tracks(tracks) -> Plan` per pair, into:
+      **duplicate** (symmetric ~unity containment, e.g. s1≈s2),
+      **contained** (C's active windows ⊆ M's + `M−g·C` decorrelates ⇒ isolate
+      `M−C`), **acoustic-bleed** (delayed copy ⇒ gate; reuse `spike/detect.py`),
+      or **independent**. Emit a recording-level plan: clean-speaker tracks,
+      derived (subtracted) tracks, dropped duplicates.
+- [ ] Signals: active-set containment + scalar-subtraction residual/decorrelation
+      (validated in `spike/subtract_probe.py`) + lagged-xcorr direction.
+- [ ] Tests (synthetic): contained→isolate, duplicate→drop-one,
+      independent→keep-both, acoustic-bleed→gate.
+
+### Phase 2 — Isolation + residual cleanup
+- [ ] `isolate(M, C) -> residual` — scalar `g=<M,C>/<C,C>` subtraction (fallback
+      to short-FIR only if scalar leaves the ref correlated).
+- [ ] **Noise-gate / VAD the residual** (zero out inactive windows) so Whisper
+      doesn't hallucinate filler on the near-silent gaps — the gotcha found in
+      testing. Reuse the active-window mask.
+- [ ] Render isolated/clean speaker tracks to temp wav for the engine (keeps the
+      "engine takes a file path" contract). **Source never touched.**
+- [ ] Tests: residual isolates the unique speaker; gate kills silence; clean
+      track passes through; source untouched.
 
 ### Phase 3 — Worker integration `app/worker.py`
-- [ ] Refactor `_transcribe_multi_track`: **extract-all → detect → gate →
-      transcribe** (today it extracts+transcribes one track at a time).
-- [ ] Honor `job.remove_crosstalk` + `job.crosstalk_exclude`.
-- [ ] Emit `Removing mic bleed from {n} tracks…` via `progress_detail_var`.
-- [ ] `md_writer`: append the provenance footer when cleaning was applied.
-- [ ] Tests: worker path with a synthetic bleedy fixture → single, correctly-
-      attributed transcript (no ghost lines).
+- [ ] Refactor `_transcribe_multi_track`: **decode-all → classify → isolate/gate/
+      drop-duplicates → transcribe each resulting speaker → merge with labels.**
+      (Fixes the current "transcribes the same audio 3×" bug for this file.)
+- [ ] Honor a per-job enable flag + per-track opt-out.
+- [ ] Emit an honest preprocessing status (e.g. `Separating speakers…`) via
+      `progress_detail_var`.
+- [ ] `md_writer`: provenance footer noting derived/dropped tracks.
+- [ ] Tests: synthetic contained-voice fixture → 2 clean, correctly-labeled
+      speakers, no duplicated lines.
 
-### Phase 4 — UI `app/ui.py` (UX-expert-designed surface)
-- [ ] `Job`: add `remove_crosstalk: bool`, `crosstalk_exclude: set[int]`,
-      derived `bleed_sources` (populated in the same async probe that fills
-      `duplicate_of`).
-- [ ] `settings.json`: add `remove_crosstalk: true` (per-track exclusions stay
-      per-Job — track indices don't transfer across files).
-- [ ] Global toggle (shown only when `bleed_sources` non-empty) + subtext.
-- [ ] Contaminated-row sub-label + click/context-menu opt-out.
-- [ ] The four disclosure states: auto-cleaned / ask / refuse / none.
-- [ ] Keyboard-reachable, contrast-safe (state via text not color), disabled
-      while transcribing — consistent with existing track controls.
+### Phase 4 — UI `app/ui.py` (UX-expert-designed surface, re-scoped)
+- [ ] `Job`: enable flag, per-track exclusions, derived relationship plan
+      (populated in the same async probe that fills `duplicate_of`).
+- [ ] `settings.json`: persist the default enable flag.
+- [ ] Panel shows the detected plan in plain language, e.g.
+      *"Track 3 — one voice (kept). Track 1 — has Track 3 mixed in; we'll isolate
+      the other voice. Track 2 — same as Track 1 (skipped)."* + names.
+- [ ] Toggle (default on when a plan is found) + per-track opt-out + speaker
+      naming; keyboard-reachable, contrast-safe, disabled while transcribing.
 
-### Phase 5 — Trust surface: A/B listen (optional, cheap)
-- [ ] Collapsed "Review": play cleaned (mask-ducked) vs `▶ Hear original` on the
-      existing `TrackPlayer`; optionally draw muted spans faintly on the
-      waveform.
+### Phase 5 — Verify on the **real** recording — CLOSE-gate
+- [ ] Run the app on the Miroslav call: expect **2 speakers** (host + client),
+      clean, no triple-transcription, host questions correctly attributed.
+      Keep all outputs local (sensitive client data; public repo).
 
-### Phase 6 — Verify on the real app — CLOSE
-- [ ] Run the actual app on a genuinely bleedy multi-track recording; confirm
-      ghost lines are gone and attribution is correct end-to-end (not just green
-      tests).
+### Phase 6 — Close / lessons
 - [ ] Capture lessons in `wiki.md`; flip folder `OPEN` → `CLOSED`.
 
-### Deferred (only if Phase 6 shows gating is insufficient)
-- NLMS adaptive-subtraction escalation per-pair, behind the same single toggle
-  (auto-picked strength). Kept out of scope unless real recordings demand it.
+### Deferred
+- Acoustic-bleed **gating** path (Phase-0 detector) — kept but idle until a real
+  in-room multi-mic recording needs it.
+- Short-FIR/NLMS subtraction — only if a real recording shows non-unity / delayed
+  containment that scalar subtraction can't clean.
 
 ## Status
 - 2026-09-23: Update opened. Feasibility validated (time-aligned streams;
@@ -171,10 +192,11 @@ direction + lag reliably. **Verdict: GO.**
   the design above.
 - 2026-09-23: **Phase 0 spike done → GO.** Directional detection reliable
   (0/60 clean false positives; user's 3-track case nailed). Thresholds set.
-- 2026-09-23: **Real-recording reality check (see `wiki.md`).** Ran the detector
-  on the user's real OBS sales call: all 3 tracks are near-identical full mixes
-  (zero-lag corr 0.95–1.00, dual-mono), i.e. **no acoustic bleed present** — this
-  is the duplicate-tracks case, not the bleed case. Detector correctly refuses
-  everywhere (good fail-safe). **Blocked on Phases 2–6 until we confirm the real
-  recording setup and get an actual in-room multi-mic file to tune against.**
-  Awaiting user input on their recording setup.
+- 2026-09-23: **Real-recording analysis → task re-scoped.** User clarified the
+  setup; verified the true structure on the real call (`spike/subtract_probe.py`,
+  `spike/verify_speakers.py`): s3 = clean single voice, s1 = s3 + local speaker
+  (unity gain, zero lag), s2 ≈ s1 duplicate. **`s1 − s3` (g=0.999) cleanly
+  isolates the other speaker** — proven by transcribing the residual (host's
+  questions, absent from s3). Real task = **speaker isolation by reference
+  subtraction**, not acoustic bleed. Roadmap revised (see ⟳ Plan revision).
+  **Next: Phase 1 — `src/track_separation.py` classifier.** Building now.

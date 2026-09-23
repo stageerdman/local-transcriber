@@ -198,6 +198,48 @@ in Phases 2–6, we need to confirm the user's real recording setup actually
 produces isolated per-mic tracks with bleed (in-room multi-mic), and get such a
 file to tune against. Flagged to the user.
 
+## DEFINITIVE structure of the real recording (2026-09-23)
+After the user clarified the setup (one mic that also captures the computer's
+audio; a separate clean computer-audio track), I verified the true structure
+empirically with `spike/subtract_probe.py` (active-set + subtraction) and
+`spike/verify_speakers.py` (transcribe clean track, mix track, and residual).
+
+**Confirmed structure (privacy note: the call is a real client's sensitive
+health consultation — NO transcript content is recorded here or committed; the
+repo is public):**
+- **s3 = one speaker only** (the "person in the computer" / remote party),
+  clean. Active in ~64% of windows; whenever s3 is active, s1/s2 are too
+  (containment = 1.00), and s1/s2 are additionally active in the ~23% of windows
+  that are the *other* speaker's solo turns.
+- **s1 = s3 + the other speaker** (the host mic, which also carries the computer
+  audio). `s2 ≈ s1` (near-duplicate full mix).
+- **s1 − g·s3 with g = 0.999 isolates the other speaker**, residual decorrelated
+  from s3 (corr 0.00), −12 dB. Transcribing the residual yields the host's
+  utterances that appear **nowhere** in s3 — proving clean separation. The
+  relationship is **digital, unity-gain, zero-lag** (OBS mixed desktop audio into
+  the mic track), so a scalar subtraction is exact; adaptive filtering is NOT
+  needed here (and my quick Wiener FIR did *worse* than scalar — expected).
+
+**So the real task ≠ acoustic mic-bleed.** It is **speaker isolation by reference
+subtraction** in a "contained-voice" recording:
+- One track (C) is a clean single voice.
+- Another track (M) contains C plus a second voice, at ~unity gain / zero lag.
+- Output two clean speakers: **C as-is**, and **M − C** for the other; drop the
+  duplicate mix (s2).
+
+**Gotcha found:** the residual (M−C) is mostly silence during C's solo turns, and
+Whisper **hallucinates** filler ("a a a a") on the near-silent gaps. So the
+isolation step must be followed by a **noise gate / VAD** on the residual before
+transcription (or transcribe only its active regions). This is essential to "do
+it right."
+
+**Detection signal for this regime** (distinct from the acoustic-bleed tiers):
+- zero-lag dominant + very high rho (≥ ~0.9) + strong active-set **containment**
+  (C's active windows ⊆ M's, and M has extra solo windows) ⇒ "C is contained in
+  M": isolate.
+- If two tracks are contained in *each other* symmetrically at ~unity (s1≈s2)
+  ⇒ duplicates: keep one.
+
 ## Open questions / risks
 - **Detection reliability is the whole feature's gate** (Phase 0). If we can't
   detect direction + confidence robustly, safe-by-default is impossible → stop.

@@ -8,3 +8,7 @@ __pycache__/
 *.py[cod]
 .DS_Store
 dist/
+
+# never commit real-call audio/transcripts produced by spikes
+updates/**/spike/_*
+*.wav
