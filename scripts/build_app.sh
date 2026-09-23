@@ -111,10 +111,16 @@ cd "\$PROJECT_DIR"
 # not include Homebrew, so ffmpeg/ffprobe wouldn't be found even though a
 # Terminal shell finds them fine. Add the common Homebrew bin dirs.
 export PATH="/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:\$PATH"
-if [ -d ".venv" ]; then
-  source ".venv/bin/activate"
+# Run the venv's interpreter by absolute path rather than \`source activate\`:
+# a venv's activate script bakes in an absolute VIRTUAL_ENV, so if the project
+# is ever moved/renamed activation silently prepends a dead path and \`python3\`
+# falls through to a system Python without our deps (tkinter/tkinterdnd2).
+# The venv interpreter finds its own site-packages via pyvenv.cfg regardless.
+if [ -x ".venv/bin/python3" ]; then
+  exec ".venv/bin/python3" -m app.main
+else
+  exec python3 -m app.main
 fi
-exec python3 -m app.main
 LAUNCHER
 chmod +x "$BUNDLE_PATH/Contents/MacOS/$APP_NAME"
 

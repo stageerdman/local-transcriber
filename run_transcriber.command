@@ -13,16 +13,21 @@ echo "Local Transcriber"
 echo "Project folder: $SCRIPT_DIR"
 echo
 
-if [ -d ".venv" ]; then
-  echo "Activating .venv..."
-  source ".venv/bin/activate"
+# Run the venv's interpreter by absolute path rather than `source activate`:
+# activate bakes in an absolute VIRTUAL_ENV, so a moved/renamed project makes
+# activation prepend a dead path and `python3` falls through to a system
+# Python without our deps. The venv interpreter still finds its own
+# site-packages via pyvenv.cfg.
+if [ -x ".venv/bin/python3" ]; then
+  PYTHON_BIN=".venv/bin/python3"
 else
   echo "No .venv found. Using system python3."
+  PYTHON_BIN="python3"
 fi
 
 echo "Starting Local Transcriber..."
 echo
-python3 -m app.main
+"$PYTHON_BIN" -m app.main
 STATUS=$?
 
 echo
