@@ -129,6 +129,42 @@ Both agents converged strongly; recorded here are the reconciled decisions.
 - Preprocessing status: `Removing mic bleed from {n} tracks…`
 - Transcript footer: `_Mic-bleed cleanup applied to: Person 2, Room laptop._`
 
+## Phase 0 spike results (2026-09-23) — GO
+Detector = per-window (250 ms, 125 ms hop) normalized cross-correlation over
+±30 ms lags; aggregate `rho`, dominant `lag` (sign ⇒ direction),
+`lag_consistency`, `side_symmetry`; plus a per-window gating mask. Code in
+`spike/` (synth.py, detect.py, cases.py, sweep.py) — self-contained, no new deps.
+
+Measured:
+- Clean pair rho ≈ 0.047; **0/60 false positives** across random voice pairs,
+  overlap 0.4–0.95, max rho 0.117.
+- B→A α=0.30 τ=8 ms: rho 0.296, correct direction, 60% windows gated.
+- 3-track (P3→P2, user's case): only P2,P3 flagged (rho 0.326, dir P3→P2,
+  consistency 1.00, lag 6 ms); P1,P2 & P1,P3 dismissed.
+- Zero direction errors for τ ≥ 5 ms at every α.
+- Blind spots (both fail *safe*): τ ≤ 2 ms → refuse (direction unresolvable);
+  α < 0.15 (~16 dB down) → below clean floor, not gated.
+- Mutual-bleed guardrail: single-direction symmetry ≈ 0.00 vs any real mutual
+  ≥ 0.45 → mutual cut set to 0.30; equal 0.5/0.5 mutual correctly refuses,
+  strongly-asymmetric (0.4/0.1) still auto-cleans dominant direction.
+
+**Chosen thresholds** (high confidence on clean/strong/mutual boundaries; the
+0.12–0.22 "ask" band is the genuinely fuzzy zone, routed to a human):
+```
+RHO_CLEAN       = 0.12   # below -> clean (max clean pair measured 0.117)
+RHO_STRONG      = 0.22   # + consistent lag -> confident bleed
+CONSIST_MIN     = 0.60   # >=60% active windows agree on lag sign+value
+SYMMETRY_MUTUAL = 0.30   # + strong rho -> mutual -> refuse
+ZERO_LAG_BAND   = 2 ms   # |lag| within -> direction unresolvable -> refuse
+```
+Tiers: auto-clean = `rho<0.12` OR (`rho>=0.22` & consistency>=0.60 & resolvable);
+ask = correlated 0.12–0.22 or low consistency; refuse = mutual OR zero-lag.
+
+**Carry to Phase 1:** thresholds fit on synthetic FIR reverb — **re-fit
+rho/symmetry on a real recording** before shipping (heavier real-room reverb
+spreads the correlation peak, may lower true-bleed rho). Mechanism is sound; the
+scalars are data-dependent.
+
 ## Open questions / risks
 - **Detection reliability is the whole feature's gate** (Phase 0). If we can't
   detect direction + confidence robustly, safe-by-default is impossible → stop.

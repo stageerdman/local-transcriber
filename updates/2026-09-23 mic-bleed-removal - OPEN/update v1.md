@@ -93,17 +93,22 @@ quick gut-check, doesn't block engineering.
 
 ## Phased roadmap
 
-### Phase 0 — Detection spike (isolated, in this folder) — GATE
-Run *outside* the app, in `spike/`. Validate on synthetic + (if available) real
-multi-track audio that directional bleed is **reliably** detectable via lagged
-cross-correlation, and characterize false-positive / false-negative behavior.
-Decide the confidence thresholds that map to auto-clean / ask / refuse.
-**Gate: if detection isn't reliable enough to be safe-by-default, stop here** and
-report back rather than shipping something that damages transcripts.
-- [ ] Synthesize bleed (attenuate + delay + light reverb a clean track into
-      another) and confirm detection recovers the true direction + lag.
-- [ ] Sweep attenuation/delay/overlap; record where detection breaks.
-- [ ] Pick thresholds for the three tiers; write findings to `wiki.md`.
+### Phase 0 — Detection spike (isolated, in this folder) — GATE ✅ GO
+Ran in `spike/` (synth.py / detect.py / cases.py / sweep.py). Windowed
+normalized cross-correlation (250 ms / 125 ms hop, ±30 ms lags) recovers
+direction + lag reliably. **Verdict: GO.**
+- [x] Synthetic bleed recovers true direction + lag. The user's exact 3-track
+      case (P3→P2) detected correctly: only P2,P3 flagged, dir P3→P2, exact 6 ms
+      lag; both clean pairs (P1,P2 / P1,P3) dismissed.
+- [x] Swept α × τ × overlap. Clean pairs: **0/60 false positives** (max rho
+      0.117). Zero direction errors for τ ≥ 5 ms at every α. Known safe blind
+      spots: τ ≤ 2 ms → direction unresolvable → *refuse* (not mislabeled);
+      α < 0.15 (~16 dB down) → below floor → not gated (too faint to matter).
+- [x] Thresholds picked (in `wiki.md`): RHO_CLEAN 0.12, RHO_STRONG 0.22,
+      CONSIST_MIN 0.60, SYMMETRY_MUTUAL 0.30, zero-lag band 2 ms.
+- Caveat carried to Phase 1: thresholds fit on synthetic reverb; **re-fit rho/
+  symmetry on a real recording** before shipping (heavy room reverb spreads the
+  peak and may lower true-bleed rho). Mechanism is sound; scalars need real data.
 
 ### Phase 1 — Detection module `src/crosstalk.py`
 - [ ] `decode_track_pcm(source, stream_index, channel_index, target_rate)` —
@@ -163,4 +168,8 @@ report back rather than shipping something that damages transcripts.
 ## Status
 - 2026-09-23: Update opened. Feasibility validated (time-aligned streams;
   numpy/scipy/ffmpeg already present). Two UX-expert designs synthesized into
-  the design above. **Next: Phase 0 detection spike (the gate).**
+  the design above.
+- 2026-09-23: **Phase 0 spike done → GO.** Directional detection reliable
+  (0/60 clean false positives; user's 3-track case nailed). Thresholds set.
+  **Next: Phase 1 — `src/crosstalk.py` detection module.** (Awaiting go-ahead
+  to start the build.)
