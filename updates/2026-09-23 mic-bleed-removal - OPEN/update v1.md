@@ -171,5 +171,10 @@ direction + lag reliably. **Verdict: GO.**
   the design above.
 - 2026-09-23: **Phase 0 spike done → GO.** Directional detection reliable
   (0/60 clean false positives; user's 3-track case nailed). Thresholds set.
-  **Next: Phase 1 — `src/crosstalk.py` detection module.** (Awaiting go-ahead
-  to start the build.)
+- 2026-09-23: **Real-recording reality check (see `wiki.md`).** Ran the detector
+  on the user's real OBS sales call: all 3 tracks are near-identical full mixes
+  (zero-lag corr 0.95–1.00, dual-mono), i.e. **no acoustic bleed present** — this
+  is the duplicate-tracks case, not the bleed case. Detector correctly refuses
+  everywhere (good fail-safe). **Blocked on Phases 2–6 until we confirm the real
+  recording setup and get an actual in-room multi-mic file to tune against.**
+  Awaiting user input on their recording setup.

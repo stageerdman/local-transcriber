@@ -165,6 +165,39 @@ rho/symmetry on a real recording** before shipping (heavier real-room reverb
 spreads the correlation peak, may lower true-bleed rho). Mechanism is sound; the
 scalars are data-dependent.
 
+## Real-recording reality check (2026-09-23) — IMPORTANT
+Ran the detector against a real user recording ("Sales Call - Miroslav.mov", OBS,
+3 audio streams, 25 min). Harness: `spike/real_data.py`, `spike/channel_probe.py`.
+
+**Finding: this recording does NOT contain the mic-bleed pattern the feature
+targets.** Structure measured:
+- Each stream is **dual-mono** (L channel == R channel, exactly identical).
+- All three streams are **near-identical full mixes**: zero-lag correlation
+  0.95–1.00 between every stream pair, **dominant lag = 0 ms everywhere**, across
+  windows at 60 s / 300 s / 1200 s. RMS differs slightly (stream 2 ~3–5 dB
+  quieter) — gain/processing differences, not different speakers.
+- The detector **correctly refuses in every window** (zero-lag ⇒ direction
+  unresolvable ⇒ refuse). It did not manufacture a false directional bleed. Good
+  fail-safe behavior confirmed on real data.
+
+**Interpretation:** this is a *remote* sales call recorded via OBS where every
+track carries essentially the same program mix — there are **no isolated
+per-speaker microphones**, so there is nothing to subtract. Acoustic bleed
+requires multiple *open mics in one physical room*; a remote call routed through
+OBS doesn't produce it (and this OBS setup didn't save isolated sources either).
+This is the **whole-track (near-)duplicate** case — which the app's existing
+`_maybe_analyze_tracks` duplicate detection is the right mechanism for, not this
+feature. (Note: the existing detector uses 150-bucket envelope correlation with a
+0.98/0.995 threshold; at 0.95–0.99 these tracks sit right at its boundary — worth
+a look separately.)
+
+**Consequence for this update:** cannot re-fit bleed thresholds on this file
+(no bleed present). Phase 1 detector code is still valid and setup-independent,
+and its refusal on this file is already the correct outcome. But before investing
+in Phases 2–6, we need to confirm the user's real recording setup actually
+produces isolated per-mic tracks with bleed (in-room multi-mic), and get such a
+file to tune against. Flagged to the user.
+
 ## Open questions / risks
 - **Detection reliability is the whole feature's gate** (Phase 0). If we can't
   detect direction + confidence robustly, safe-by-default is impossible → stop.
