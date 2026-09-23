@@ -135,6 +135,11 @@ class RowWidgets:
     # channel(s) that track is currently set to use, even if it has more
     # than one underlying channel.
     track_canvases: dict[int, tk.Canvas] = field(default_factory=dict)
+    # Per-track manual-control widgets (keyed by AudioStream.index).
+    track_name_vars: dict[int, tk.StringVar] = field(default_factory=dict)
+    track_status_labels: dict[int, ttk.Label] = field(default_factory=dict)
+    track_detail_frames: dict[int, ttk.Frame] = field(default_factory=dict)
+    tracks_header: "ttk.Label | None" = None
 
 
 class MainWindow:
@@ -162,6 +167,9 @@ class MainWindow:
         self._player = TrackPlayer()
         # (job_id, stream_index) of the track currently playing, or None.
         self._playing: tuple[int, int] | None = None
+        # (job.id, AudioStream.index) pairs whose per-track detail drawer is
+        # open in the panel.
+        self._track_details_open: set[tuple[int, int]] = set()
         # Playhead per track as a fraction [0, 1] of its duration. Persists
         # after stop so ▶ resumes where it left off; reset to 0 when another
         # track takes over.
@@ -557,6 +565,10 @@ class MainWindow:
         row.channel_combos = {}
         row.track_canvases = {}
         row.track_play_buttons = {}
+        row.track_name_vars = {}
+        row.track_status_labels = {}
+        row.track_detail_frames = {}
+        row.tracks_header = None
 
         tracks = job.tracks
         if tracks is None:
@@ -570,15 +582,18 @@ class MainWindow:
             ).pack(anchor="w")
             return
 
-        names = track_speaker_names(tracks)
-        name_by_index = dict(zip((s.index for s in tracks), names))
         if job.selected_track_indices is None:
             job.selected_track_indices = {s.index for s in tracks}
         show_checkboxes = len(tracks) > 1
-        identical_channel_pairs = job.channel_pairs_identical or {}
-        duplicate_of = job.duplicate_of or {}
+        editable = job.status == "ready"
 
-        for stream, name in zip(tracks, names):
+        if show_checkboxes:
+            header = ttk.Label(row.tracks_container, foreground="#777")
+            header.pack(anchor="w", pady=(0, 3))
+            row.tracks_header = header
+            self._update_tracks_header(job)
+
+        for stream in tracks:
             track_row = ttk.Frame(row.tracks_container)
             track_row.pack(fill="x", pady=1)
             self._bind_mousewheel(track_row)
@@ -597,50 +612,39 @@ class MainWindow:
             play_button.pack(side="left", padx=(0, 6))
             row.track_play_buttons[stream.index] = play_button
 
-            dup_source = duplicate_of.get(stream.index)
-            label_text = name
-            if dup_source is not None:
-                label_text = f"{name} (~{name_by_index.get(dup_source, dup_source)})"
-
             if show_checkboxes:
                 var = tk.BooleanVar(value=stream.index in job.selected_track_indices)
                 checkbutton = ttk.Checkbutton(
                     track_row,
-                    text=label_text,
                     variable=var,
                     command=lambda s=stream, v=var: self._on_track_toggle(job, s.index, v),
                 )
-                checkbutton.configure(state="normal" if job.status == "ready" else "disabled")
-                checkbutton.pack(side="left", padx=(0, 6))
+                checkbutton.configure(state="normal" if editable else "disabled")
+                checkbutton.pack(side="left")
                 row.track_checkbuttons.append(checkbutton)
-            else:
-                ttk.Label(track_row, text=label_text, width=14, anchor="w").pack(side="left", padx=(0, 6))
 
-            channels_identical = stream.channels > 1 and identical_channel_pairs.get(stream.index, False)
+            # Editable speaker name - becomes the transcript's speaker label.
+            name_var = tk.StringVar(value=self._current_track_name(job, stream))
+            row.track_name_vars[stream.index] = name_var
+            name_entry = ttk.Entry(track_row, textvariable=name_var, width=14)
+            name_entry.configure(state="normal" if editable else "disabled")
+            name_entry.pack(side="left", padx=(2, 6))
+            name_entry.bind("<Return>", lambda _e, s=stream, v=name_var: self._commit_track_name(job, s, v))
+            name_entry.bind("<FocusOut>", lambda _e, s=stream, v=name_var: self._commit_track_name(job, s, v))
 
-            # A stream's channels aren't assumed to carry the same signal
-            # (e.g. two mics recorded to L/R of one stream) - let the user
-            # pin this track to just one of them instead of always
-            # downmixing every channel together. Skipped when both channels
-            # turned out to be the same signal anyway (e.g. a mono mic
-            # duplicated to stereo) - picking "Ch 1" vs "Ch 2" would be a
-            # meaningless choice, so don't show it.
-            if stream.channels > 1 and not channels_identical:
-                channel_var = tk.StringVar(value=self._channel_mode_label(job, stream))
-                channel_combo = ttk.Combobox(
-                    track_row,
-                    textvariable=channel_var,
-                    values=["Mix"] + [f"Ch {i + 1}" for i in range(stream.channels)],
-                    state="readonly",
-                    width=6,
-                )
-                channel_combo.configure(state="readonly" if job.status == "ready" else "disabled")
-                channel_combo.pack(side="left", padx=(0, 6))
-                channel_combo.bind(
-                    "<<ComboboxSelected>>",
-                    lambda _e, s=stream, v=channel_var: self._on_channel_mode_changed(job, s.index, v),
-                )
-                row.channel_combos[stream.index] = channel_combo
+            # Detail-drawer disclosure (language / noise / remove-a-voice).
+            detail_button = ttk.Button(
+                track_row,
+                text="▾" if (job.id, stream.index) in self._track_details_open else "▸",
+                width=2,
+                command=lambda s=stream: self._toggle_track_detail(job, s.index),
+            )
+            detail_button.pack(side="left", padx=(0, 6))
+
+            # Right-edge read-only status summary (language / Clean / − Name / ~Dup).
+            status = ttk.Label(track_row, foreground="#868e96", anchor="e")
+            status.pack(side="right", padx=(6, 0))
+            row.track_status_labels[stream.index] = status
 
             canvas = tk.Canvas(
                 track_row,
@@ -663,6 +667,199 @@ class MainWindow:
             row.track_canvases[stream.index] = canvas
             self._set_canvas_enabled(canvas, job.status == "ready" and TrackPlayer.available())
             self._redraw_track(job, stream.index)
+
+            if (job.id, stream.index) in self._track_details_open:
+                self._build_track_detail(job, stream)
+
+            self._update_track_status(job, stream)
+
+    # -- per-track manual controls (name / language / noise / subtraction) ----
+    def _noise_default(self) -> bool:
+        return bool(self.settings.get("noise_filter_default", True))
+
+    def _track_default_name(self, job: Job, stream: AudioStream) -> str:
+        tracks = job.tracks or [stream]
+        names = track_speaker_names(tracks)
+        return dict(zip((s.index for s in tracks), names)).get(stream.index, f"Person {stream.index}")
+
+    def _current_track_name(self, job: Job, stream: AudioStream) -> str:
+        override = (job.track_names or {}).get(stream.index)
+        return override if override else self._track_default_name(job, stream)
+
+    def _track_name_by_index(self, job: Job, index: int) -> str:
+        stream = next((s for s in (job.tracks or []) if s.index == index), None)
+        return self._current_track_name(job, stream) if stream else f"Person {index}"
+
+    def _commit_track_name(self, job: Job, stream: AudioStream, var: tk.StringVar) -> None:
+        if job.status != "ready":
+            return
+        name = var.get().strip()
+        if not name:
+            name = self._track_default_name(job, stream)
+            var.set(name)
+        if job.track_names is None:
+            job.track_names = {}
+        if job.track_names.get(stream.index) == name:
+            return
+        job.track_names[stream.index] = name
+        # Other rows reference this name (subtraction summaries); refresh all.
+        for s in job.tracks or []:
+            self._update_track_status(job, s)
+
+    def _toggle_track_detail(self, job: Job, stream_index: int) -> None:
+        key = (job.id, stream_index)
+        if key in self._track_details_open:
+            self._track_details_open.discard(key)
+        else:
+            self._track_details_open.add(key)
+        self._render_tracks_section(job)
+
+    def _build_track_detail(self, job: Job, stream: AudioStream) -> None:
+        row = self.rows.get(job.id)
+        if row is None:
+            return
+        editable = job.status == "ready"
+        state = "normal" if editable else "disabled"
+        readonly = "readonly" if editable else "disabled"
+
+        detail = ttk.Frame(row.tracks_container)
+        detail.pack(fill="x", padx=(34, 0), pady=(1, 5))
+        self._bind_mousewheel(detail)
+        row.track_detail_frames[stream.index] = detail
+
+        # Language (first choice = inherit the file's global language).
+        ttk.Label(detail, text="Language").pack(side="left")
+        override = (job.track_languages or {}).get(stream.index)
+        has_override = bool(job.track_languages) and stream.index in job.track_languages
+        lang_label = LANGUAGE_VALUE_TO_LABEL.get(override, "Auto-detect") if has_override else "Same as file"
+        lang_var = tk.StringVar(value=lang_label)
+        lang_combo = ttk.Combobox(
+            detail,
+            textvariable=lang_var,
+            values=["Same as file"] + [label for label, _v in LANGUAGE_CHOICES],
+            state=readonly,
+            width=14,
+        )
+        lang_combo.pack(side="left", padx=(4, 12))
+        lang_combo.bind(
+            "<<ComboboxSelected>>",
+            lambda _e, v=lang_var: self._on_track_language_changed(job, stream, v),
+        )
+
+        # Noise filter.
+        noise_on = (job.track_denoise or {}).get(stream.index, self._noise_default())
+        noise_var = tk.BooleanVar(value=noise_on)
+        noise_check = ttk.Checkbutton(
+            detail,
+            text="Reduce background noise",
+            variable=noise_var,
+            command=lambda v=noise_var: self._on_track_denoise_changed(job, stream, v),
+        )
+        noise_check.configure(state=state)
+        noise_check.pack(side="left", padx=(0, 12))
+
+        # Remove-a-voice (subtraction). Only meaningful with another track.
+        others = [s for s in (job.tracks or []) if s.index != stream.index]
+        if others:
+            ttk.Label(detail, text="Remove voice").pack(side="left")
+            refs = (job.track_subtractions or {}).get(stream.index, [])
+            current = "Keep both voices"
+            if refs:
+                current = self._track_name_by_index(job, refs[0])
+            subtract_var = tk.StringVar(value=current)
+            subtract_combo = ttk.Combobox(
+                detail,
+                textvariable=subtract_var,
+                values=["Keep both voices"] + [self._current_track_name(job, s) for s in others],
+                state=readonly,
+                width=16,
+            )
+            subtract_combo.pack(side="left", padx=(4, 12))
+            subtract_combo.bind(
+                "<<ComboboxSelected>>",
+                lambda _e, v=subtract_var: self._on_track_subtract_changed(job, stream, others, v),
+            )
+
+        # Channel picker (only when a stream has >1 non-identical channel).
+        identical = (job.channel_pairs_identical or {}).get(stream.index, False)
+        if stream.channels > 1 and not identical:
+            channel_var = tk.StringVar(value=self._channel_mode_label(job, stream))
+            channel_combo = ttk.Combobox(
+                detail,
+                textvariable=channel_var,
+                values=["Mix"] + [f"Ch {i + 1}" for i in range(stream.channels)],
+                state=readonly,
+                width=6,
+            )
+            channel_combo.pack(side="left")
+            channel_combo.bind(
+                "<<ComboboxSelected>>",
+                lambda _e, v=channel_var: self._on_channel_mode_changed(job, stream.index, v),
+            )
+            row.channel_combos[stream.index] = channel_combo
+
+    def _on_track_language_changed(self, job: Job, stream: AudioStream, var: tk.StringVar) -> None:
+        if job.track_languages is None:
+            job.track_languages = {}
+        label = var.get()
+        if label == "Same as file":
+            job.track_languages.pop(stream.index, None)
+        else:
+            job.track_languages[stream.index] = LANGUAGE_LABEL_TO_VALUE.get(label)
+        self._update_track_status(job, stream)
+
+    def _on_track_denoise_changed(self, job: Job, stream: AudioStream, var: tk.BooleanVar) -> None:
+        if job.track_denoise is None:
+            job.track_denoise = {}
+        job.track_denoise[stream.index] = bool(var.get())
+        self._update_track_status(job, stream)
+
+    def _on_track_subtract_changed(
+        self, job: Job, stream: AudioStream, others: list[AudioStream], var: tk.StringVar
+    ) -> None:
+        if job.track_subtractions is None:
+            job.track_subtractions = {}
+        label = var.get()
+        if label == "Keep both voices":
+            job.track_subtractions.pop(stream.index, None)
+        else:
+            ref = next((s for s in others if self._current_track_name(job, s) == label), None)
+            if ref is not None:
+                job.track_subtractions[stream.index] = [ref.index]
+        self._update_track_status(job, stream)
+
+    def _track_status_summary(self, job: Job, stream: AudioStream) -> str:
+        parts: list[str] = []
+        if (job.track_languages or {}).get(stream.index) is not None or (
+            job.track_languages and stream.index in job.track_languages
+        ):
+            value = job.track_languages[stream.index]
+            parts.append(LANGUAGE_VALUE_TO_LABEL.get(value, "Auto"))
+        if (job.track_denoise or {}).get(stream.index, self._noise_default()):
+            parts.append("Clean")
+        refs = (job.track_subtractions or {}).get(stream.index, [])
+        if refs:
+            parts.append("− " + ", ".join(self._track_name_by_index(job, r) for r in refs))
+        dup = (job.duplicate_of or {}).get(stream.index)
+        if dup is not None:
+            parts.append(f"~{self._track_name_by_index(job, dup)}")
+        return " · ".join(parts)
+
+    def _update_track_status(self, job: Job, stream: AudioStream) -> None:
+        row = self.rows.get(job.id)
+        if row is None:
+            return
+        label = row.track_status_labels.get(stream.index)
+        if label is not None:
+            label.configure(text=self._track_status_summary(job, stream))
+
+    def _update_tracks_header(self, job: Job) -> None:
+        row = self.rows.get(job.id)
+        if row is None or row.tracks_header is None:
+            return
+        n = len(job.tracks or [])
+        k = len(job.selected_track_indices or set())
+        row.tracks_header.configure(text=f"Tracks — {n} detected, {k} included")
 
     def _channel_mode_label(self, job: Job, stream: AudioStream) -> str:
         channel_index = (job.selected_channel_by_track or {}).get(stream.index)
@@ -1033,6 +1230,7 @@ class MainWindow:
                 var.set(True)
                 return
             job.selected_track_indices.discard(stream_index)
+        self._update_tracks_header(job)
         self._recompute_estimate(job)
 
     # -- pre-start time estimate ----------------------------------------------
