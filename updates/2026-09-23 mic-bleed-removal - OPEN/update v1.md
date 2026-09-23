@@ -204,6 +204,20 @@ lagged-xcorr direction test is reused by the classifier).
   reliable** (2 of 5 wrong; Michal K genuinely ambiguous — see `wiki.md` table).
   **PIVOT (user-directed): drop auto-classification, give the user manual control
   with great UX** — per track: include/exclude, name, language, noise filter,
-  and declare subtractions. Engine primitives stay as the backend. **Two UX-pro
-  agents designing the panel + subtraction interaction. Next: synthesize → build
-  the manual multi-track control UI + wire per-track controls into Job/worker.**
+  and declare subtractions. Engine primitives stay as the backend.
+- 2026-09-23: **Manual-control feature BUILT.** Two UX-pro designs synthesized &
+  user-approved (noise default ON). Shipped:
+  - Engine: `render_transcription_wav` (subtract refs → RNNoise → gate).
+  - Backend: Job per-track fields + `_transcribe_multi_track` rewrite (per-track
+    name→label, language override, noise filter, subtraction). Wiring test.
+  - UI: multi-track panel with play · include · **editable name** · **▾ detail
+    drawer** (language / reduce-noise / **remove-a-voice** / channel) · waveform ·
+    read-only status summary; header count. Verified via headless render smoke
+    test + clean app launch. 63 tests pass.
+  - **All of the user's explicit asks are functional:** show tracks, include/
+    exclude, name, per-track language, per-track noise filter, subtract one track
+    from another.
+  - **Polish still open (UX-pro niceties, not requested essentials):** A/B
+    "Cleaned · original" preview of a subtraction, one-time discovery hint,
+    recent-names suggestions, Reset button. **Next: verify end-to-end on a real
+    recording in the app, then add polish / close.**
