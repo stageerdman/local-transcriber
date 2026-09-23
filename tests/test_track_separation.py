@@ -3,14 +3,18 @@
 Synthetic "voices" (distinct spectra, on/off speech envelopes) let us build the
 exact relationships the classifier must recognise, with no audio files.
 """
+import shutil
+
 import numpy as np
 import pytest
 
 from src.track_separation import (
+    DEFAULT_RNNOISE_MODEL,
     SeparationPlan,
     TrackRole,
     TrackSignal,
     classify_tracks,
+    denoise_pcm,
     isolate,
     noise_gate,
     render_speaker_wav,
@@ -147,3 +151,22 @@ def test_write_wav_roundtrips_shape(tmp_path):
     write_wav(out, x)
     with wave.open(str(out), "rb") as w:
         assert w.getnframes() == len(x)
+
+
+@pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or not DEFAULT_RNNOISE_MODEL.exists(),
+    reason="ffmpeg or the RNNoise model is unavailable",
+)
+def test_denoise_preserves_length_and_reduces_overall_noise():
+    rng = np.random.default_rng(0)
+    speech = _voice(70, on_prob=0.6)
+    noise = 0.05 * rng.standard_normal(len(speech))
+    out = denoise_pcm(speech + noise, RATE)
+    assert len(out) == len(speech)
+    # denoising a mostly-quiet signal should not raise its overall energy
+    assert np.mean(out ** 2) <= np.mean((speech + noise) ** 2) + 1e-6
+
+
+def test_denoise_no_model_is_identity():
+    x = _voice(71)
+    assert np.allclose(denoise_pcm(x, RATE, model_path=None), x)

@@ -43,6 +43,11 @@ ANALYSIS_RATE = 16000  # Whisper's native rate; fine for both analysis and ASR.
 _WIN_MS = 250
 _HOP_MS = 125
 
+# RNNoise speech-denoise model, applied to isolated tracks via ffmpeg's built-in
+# `arnndn` filter (no extra Python dependency). RNNoise runs at 48 kHz, so
+# `denoise_pcm` resamples around the filter.
+DEFAULT_RNNOISE_MODEL = Path(__file__).resolve().parent.parent / "assets" / "rnnoise" / "bd.rnnn"
+
 # --- classification thresholds (validated on real + synthetic recordings) -----
 # A track is "active" in a window when its RMS there exceeds this fraction of its
 # own overall RMS.
@@ -305,6 +310,36 @@ def noise_gate(x: np.ndarray, rate: int = ANALYSIS_RATE, ramp_ms: float = 20.0) 
     return x * gain
 
 
+def denoise_pcm(
+    samples: np.ndarray,
+    rate: int = ANALYSIS_RATE,
+    model_path: Path | None = DEFAULT_RNNOISE_MODEL,
+) -> np.ndarray:
+    """Speech-denoise a mono signal with RNNoise via ffmpeg's `arnndn` filter.
+
+    Removes the broadband hiss / faint residue left after subtracting one track
+    out of another, so the isolated voice is clean for the transcriber. RNNoise
+    operates at 48 kHz, so we resample up for the filter and back down. Returns
+    the input unchanged if the model file is missing (feature simply off).
+    """
+    if model_path is None or not Path(model_path).exists():
+        return samples
+    pcm = np.clip(samples, -1.0, 1.0).astype("<f4").tobytes()
+    chain = f"aresample=48000,arnndn=m={model_path},aresample={rate}"
+    command = [
+        "ffmpeg", "-v", "error",
+        "-f", "f32le", "-ar", str(rate), "-ac", "1", "-i", "-",
+        "-af", chain,
+        "-f", "f32le", "-ac", "1", "-",
+    ]
+    out = subprocess.run(command, input=pcm, capture_output=True, check=True).stdout
+    denoised = np.frombuffer(out, dtype="<f4").astype(np.float64)
+    # ffmpeg's resampler can shift length by a few samples; align for callers.
+    if len(denoised) >= len(samples):
+        return denoised[:len(samples)]
+    return np.concatenate([denoised, np.zeros(len(samples) - len(denoised))])
+
+
 def _peak_normalize(x: np.ndarray, peak: float = 0.9) -> np.ndarray:
     m = float(np.max(np.abs(x))) if len(x) else 0.0
     if m <= 0:
@@ -328,17 +363,21 @@ def render_speaker_wav(
     role: TrackRole,
     signals_by_index: dict[int, np.ndarray],
     output_path: Path,
+    rate: int = ANALYSIS_RATE,
+    denoise_model: Path | None = DEFAULT_RNNOISE_MODEL,
 ) -> None:
     """Produce the audio for one speaker role and write it to `output_path`.
 
     "keep" -> the track as-is; "isolate" -> the track with its references
-    subtracted out and the silent gaps gated. Both are peak-normalized so the
-    (often quiet) isolated voice reaches the transcriber at a healthy level.
+    subtracted out, RNNoise-denoised, and the silent gaps gated. Both are
+    peak-normalized so the (often quiet) isolated voice reaches the transcriber
+    at a healthy level.
     """
     mix = signals_by_index[role.index]
     if role.kind == "isolate" and role.reference_indices:
         refs = [signals_by_index[i] for i in role.reference_indices]
-        out = noise_gate(isolate(mix, refs))
+        # subtract the other voice(s) -> denoise the residue -> gate the gaps
+        out = noise_gate(denoise_pcm(isolate(mix, refs), rate, denoise_model), rate)
     else:
         out = mix
-    write_wav(output_path, _peak_normalize(out))
+    write_wav(output_path, _peak_normalize(out), rate)

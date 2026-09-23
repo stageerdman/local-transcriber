@@ -12,3 +12,6 @@ dist/
 # never commit real-call audio/transcripts produced by spikes
 updates/**/spike/_*
 *.wav
+
+# RNNoise model weights (third-party; fetched at setup, not committed)
+assets/rnnoise/*.rnnn
