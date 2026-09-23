@@ -359,6 +359,33 @@ def write_wav(path: Path, samples: np.ndarray, rate: int = ANALYSIS_RATE) -> Non
         w.writeframes(pcm16.tobytes())
 
 
+def render_transcription_wav(
+    mix: np.ndarray,
+    references: list[np.ndarray],
+    output_path: Path,
+    *,
+    denoise: bool = True,
+    rate: int = ANALYSIS_RATE,
+    denoise_model: Path | None = DEFAULT_RNNOISE_MODEL,
+) -> None:
+    """Render one track's audio for transcription, applying the user's choices.
+
+    `references` are other tracks whose voices should be removed from `mix`
+    (empty = none). `denoise` runs RNNoise. When references are subtracted the
+    residual has silent gaps that would make ASR hallucinate, so those are
+    gated; a plain (un-subtracted) track is left ungated. Peak-normalized so a
+    quiet result still reaches the transcriber at a healthy level.
+    """
+    if references:
+        out = isolate(mix, references)
+        if denoise:
+            out = denoise_pcm(out, rate, denoise_model)
+        out = noise_gate(out, rate)
+    else:
+        out = denoise_pcm(mix, rate, denoise_model) if denoise else mix
+    write_wav(output_path, _peak_normalize(out), rate)
+
+
 def render_speaker_wav(
     role: TrackRole,
     signals_by_index: dict[int, np.ndarray],

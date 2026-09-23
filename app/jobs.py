@@ -75,6 +75,22 @@ class Job:
     # the UI and excluded from the default selection.
     duplicate_of: dict[int, int] | None = None
 
+    # --- per-track manual controls (set in the multi-track panel) -------------
+    # All keyed by AudioStream.index. Absent/None entries fall back to the
+    # documented defaults, so an untouched job behaves exactly as before.
+    #
+    # Custom speaker name for a track (becomes the transcript's speaker label).
+    # Missing -> the default "Person N" / metadata title.
+    track_names: dict[int, str] | None = None
+    # Per-track language override. A present value overrides `job.language` for
+    # that track; missing/None -> inherit the job's global language.
+    track_languages: dict[int, str] | None = None
+    # Per-track noise filter (RNNoise). Missing -> the default (on).
+    track_denoise: dict[int, bool] | None = None
+    # Per-track voice subtraction: index -> list of other AudioStream.index
+    # values whose voice should be removed from this track before transcribing.
+    track_subtractions: dict[int, list[int]] | None = None
+
 
 @dataclass
 class WorkerEvent:

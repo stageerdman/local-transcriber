@@ -16,14 +16,13 @@ from app.jobs import Job, WorkerEvent
 from src import dialogue, history_db, md_writer
 from src.audio_tracks import (
     AudioStream,
-    extract_channel_to_mp3,
-    extract_track_to_mp3,
     safe_probe_audio_streams,
     track_speaker_names,
 )
 from src.converter import prepare_mp3
 from src.duration import probe_duration_seconds
 from src.transcription import TranscribedSegment
+from src import track_separation
 
 SENTINEL = object()
 
@@ -88,16 +87,23 @@ class TranscriptionWorker(threading.Thread):
         job: Job,
         mp3_path: Path,
         on_progress: "Callable[[float], None] | None" = None,
+        language: str | None = SENTINEL,  # type: ignore[assignment]
     ) -> list[TranscribedSegment]:
-        """Transcribe one mp3 via the engine process.
+        """Transcribe one audio file via the engine process.
 
-        `on_progress` receives a fraction in [0, 1] of *this mp3* processed so
+        `on_progress` receives a fraction in [0, 1] of *this file* processed so
         far, as the engine reports it. Callers translate that into the job's
         overall bar value (identity for single-track; (done + frac)/N for
         multi-track).
+
+        `language` overrides the job's global language for this one call (used
+        for per-track language in multi-track jobs); left as the sentinel, it
+        falls back to `job.language`.
         """
+        if language is SENTINEL:
+            language = job.language
         self._ensure_engine_running()
-        self.request_queue.put((job.id, job.model, mp3_path, job.language))
+        self.request_queue.put((job.id, job.model, mp3_path, language))
 
         while True:
             if job.stop_event.is_set():
@@ -257,27 +263,51 @@ class TranscriptionWorker(threading.Thread):
         streams_to_transcribe: list[AudioStream],
         temp_dir: Path,
     ) -> list[dialogue.Segment]:
-        # Names are derived from the container's full track list so a track's
-        # label ("Person 2") stays stable regardless of which subset got
-        # selected for transcription.
-        name_by_index = dict(zip((s.index for s in all_streams), track_speaker_names(all_streams)))
+        # Default labels come from the container's full track list so a track's
+        # name stays stable regardless of which subset got selected; the user's
+        # custom names (from the panel) override them.
+        default_names = dict(zip((s.index for s in all_streams), track_speaker_names(all_streams)))
+        names = job.track_names or {}
+        languages = job.track_languages or {}
+        denoise_flags = job.track_denoise or {}
+        subtractions = job.track_subtractions or {}
+        channels = job.selected_channel_by_track or {}
+
+        def label_for(index: int) -> str:
+            return names.get(index) or default_names.get(index, f"Person {index}")
+
+        # Decode every track we'll need: the ones to transcribe plus any track
+        # used only as a subtraction reference. Tracks share the container's
+        # timeline, so PCM decoded here is already sample-aligned.
+        needed: set[int] = {s.index for s in streams_to_transcribe}
+        for s in streams_to_transcribe:
+            needed.update(subtractions.get(s.index, []))
+        pcm: dict[int, object] = {}
+        for index in needed:
+            if job.stop_event.is_set():
+                raise _StopRequested()
+            pcm[index] = track_separation.decode_track_pcm(
+                job.source_path, index, channels.get(index)
+            )
+
         labeled_segments: list[dialogue.Segment] = []
         total = len(streams_to_transcribe)
 
         for i, stream in enumerate(streams_to_transcribe):
-            name = name_by_index[stream.index]
+            name = label_for(stream.index)
             if job.stop_event.is_set():
                 raise _StopRequested()
 
             job.status = "converting"
             job.status_detail = f"track {i + 1}/{total} - {name}"
             self._emit(job)
-            track_mp3 = temp_dir / f"track{i}.mp3"
-            channel_index = (job.selected_channel_by_track or {}).get(stream.index)
-            if channel_index is not None:
-                extract_channel_to_mp3(job.source_path, stream.index, channel_index, track_mp3)
-            else:
-                extract_track_to_mp3(job.source_path, stream.index, track_mp3)
+
+            refs = [pcm[r] for r in subtractions.get(stream.index, []) if r in pcm]
+            denoise = denoise_flags.get(stream.index, True)
+            track_wav = temp_dir / f"track{i}.wav"
+            track_separation.render_transcription_wav(
+                pcm[stream.index], refs, track_wav, denoise=denoise
+            )
 
             if job.stop_event.is_set():
                 raise _StopRequested()
@@ -292,7 +322,8 @@ class TranscriptionWorker(threading.Thread):
                 job.transcribe_position_fraction = fraction
                 self._emit(job)
 
-            segments = self._transcribe_via_engine(job, track_mp3, on_progress)
+            language = languages.get(stream.index) or job.language
+            segments = self._transcribe_via_engine(job, track_wav, on_progress, language=language)
             labeled_segments.extend(
                 dialogue.Segment(speaker=name, start=seg.start, end=seg.end, text=seg.text)
                 for seg in segments

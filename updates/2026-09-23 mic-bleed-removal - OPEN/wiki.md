@@ -311,6 +311,39 @@ designing the panel + the subtraction interaction.
 model fetched via `scripts/fetch_rnnoise_model.sh` (gitignored, no-ops if absent).
 User confirmed the isolated+denoised audio quality is "quite good".
 
+## Synthesized manual-control UX (2026-09-23, user-approved) — BUILD
+Two UX pros (panel + subtraction) reconciled. Approved by user; **noise filter
+default ON** (user override of the pro's "off" recommendation).
+
+- **Collapsed row:** `▶ play/scrub · ☑ include · click-to-edit name ▾ · waveform ·
+  right-edge read-only status summary`. Summary tokens: language code, `Clean`
+  (denoise on), `− {Name}` (a voice removed), `~{Name}` (suspected duplicate).
+- **`▾` detail drawer** (native `pack(after=row)` like `expand_frame`): Language,
+  Reduce background noise, Remove-a-voice.
+- **Naming:** inline click/F2 to edit; default `Person N` muted → solid when set;
+  names become transcript speaker labels; "recent names" suggestions from
+  `history_db`.
+- **Per-track language:** first item `Same as app ({effective})` = inherit
+  (live link to global); concrete choice overrides that track only.
+- **Noise filter:** label `Reduce background noise` (no "RNNoise"); **default ON**.
+- **Remove a voice (subtraction):** quiet affordance → popover "Remove a voice
+  from '{name}'" listing the *other* tracks, each with ▶ hear; applies on click;
+  set-state chip `⊘ {Name}'s voice removed ✕`; row preview gains **Cleaned ·
+  original A/B** (plays `render_speaker_wav`, cached). Direction reads as object
+  of a sentence — no math words. One-time panel discovery hint. Edge cases:
+  self excluded from its own picker; reciprocal loop disabled with reason;
+  unnamed → "Track N" fallback + focus its name field; rare multi-subtract via
+  `+ another` (maps to `reference_indices` list).
+- **Duplicates:** suspected dup pre-unchecked, `~{Name}` hint, fully reversible.
+- **Persistence:** names / include / language / noise / subtraction are **per-Job**
+  (never leak across files); only preferences (noise default, drawer state,
+  global language) persist to settings.json.
+- **A11y:** keyboard loop, text-not-color state, panel read-only during
+  transcription, per-track load-error state isolated.
+- **Cut:** volume sliders, waveform zoom/timeline, solo/mute, color swatches,
+  auto-classification UI, wizard/onboarding, bulk apply, free-text tags, drag
+  gestures, confirm step, arithmetic vocabulary.
+
 ## Open questions / risks
 - **Detection reliability is the whole feature's gate** (Phase 0). If we can't
   detect direction + confidence robustly, safe-by-default is impossible → stop.
