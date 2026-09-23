@@ -10,3 +10,17 @@
       time-estimate bar. Real Whisper progress would require chunking the audio
       ourselves (quality tradeoff at chunk boundaries). See
       updates/2026-09-23 transcription-progress - CLOSED/.
+
+- [ ] Track preview scrubbing (ffplay) works but has two known rough edges,
+      both acceptable for a preview and only worth fixing if they annoy in real
+      use (would likely mean a sample-accurate player = a small new dependency):
+        * playhead is wall-clock from the seek point, so it can lead the actual
+          audio by ffplay's ~0.2-0.3s startup latency (not sample-exact);
+        * seeking restarts ffplay, so there's a tiny gap on each jump.
+      Also: preview interactions aren't unit-tested through the real Tk canvas
+      (canvas width isn't realized headless); verified via a manual/headless
+      drive instead. See updates/2026-09-23 track-preview-scrubbing - CLOSED/.
+
+- [ ] Parakeet chunking is fixed at 120s; smaller chunks would make the
+      progress bar update more often (and are more memory-safe) at some extra
+      overlap recompute. A knob to revisit if the bar's jumps feel too coarse.
