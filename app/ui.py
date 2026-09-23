@@ -87,6 +87,29 @@ def format_seconds(seconds: float | None) -> str:
     return f"{secs}s"
 
 
+def format_timecode(seconds: float | None) -> str:
+    """A clock-style position, e.g. "12:30" or "1:04:05" - used to show where
+    in the recording transcription currently is."""
+    if seconds is None:
+        return "0:00"
+    total = max(0, int(round(seconds)))
+    hours, rem = divmod(total, 3600)
+    minutes, secs = divmod(rem, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+def format_minutes_left(seconds: float | None) -> str | None:
+    """Coarse remaining-time phrase ("<1 min", "9 min") for an ETA - kept
+    deliberately rounded since it's always an approximation."""
+    if seconds is None or seconds < 0:
+        return None
+    if seconds < 45:
+        return "<1 min"
+    return f"{int(round(seconds / 60))} min"
+
+
 @dataclass
 class RowWidgets:
     frame: ttk.Frame
@@ -964,6 +987,8 @@ class MainWindow:
         job.estimated_seconds = None
         job.started_at = None
         job.elapsed_seconds = None
+        job.transcribe_fraction = None
+        job.transcribe_position_fraction = None
         job.output_path = None
         job.error = None
         self._refresh_row(job)
@@ -1011,6 +1036,50 @@ class MainWindow:
             return ICON_RESET, "normal"
         return ICON_BUSY, "disabled"
 
+    def _progress_view(self, job: Job, elapsed: float) -> dict:
+        """Unify the two progress sources so the row and the top panel agree.
+
+        `real` progress (a true fraction of the audio processed, reported by
+        the engine) wins when present: the bar tracks it and a "12:30 / 41:05"
+        timecode shows the real position, with a live ETA derived from actual
+        throughput. Otherwise we fall back to the duration-based time estimate
+        - and deliberately show NO timecode there, so a timecode on screen
+        always means a true position, never a guess.
+        """
+        duration = job.audio_duration_seconds
+        if job.transcribe_fraction is not None:
+            fraction = min(0.999, max(0.0, job.transcribe_fraction))
+            timecode = None
+            if duration and job.transcribe_position_fraction is not None:
+                position = max(0.0, min(1.0, job.transcribe_position_fraction)) * duration
+                timecode = f"{format_timecode(position)} / {format_timecode(duration)}"
+            eta = (elapsed / fraction - elapsed) if (fraction > 0 and elapsed) else None
+            return {"fraction": fraction, "real": True, "timecode": timecode, "eta": eta}
+        if job.estimated_seconds:
+            fraction = min(0.99, (elapsed or 0.0) / job.estimated_seconds)
+            return {
+                "fraction": fraction,
+                "real": False,
+                "timecode": None,
+                "eta": max(0.0, job.estimated_seconds - (elapsed or 0.0)),
+            }
+        return {"fraction": None, "real": False, "timecode": None, "eta": None}
+
+    def _transcribe_detail_text(self, job: Job, view: dict) -> str:
+        """Compact per-row label. Timecode is the hero when progress is real;
+        the fallback is clearly marked as an estimate."""
+        eta = format_minutes_left(view["eta"])
+        if view["real"]:
+            parts: list[str] = []
+            if job.status_detail:  # multi-track: "track 2/4 - Bob"
+                parts.append(job.status_detail)
+            if view["timecode"]:
+                parts.append(view["timecode"])
+            if eta:
+                parts.append(f"~{eta} left")
+            return "  ·  ".join(parts) or f"{round(view['fraction'] * 100)}%"
+        return f"~ Estimated {eta} left" if eta else "Estimating…"
+
     def _refresh_row(self, job: Job) -> None:
         row = self.rows.get(job.id)
         if row is None:
@@ -1045,17 +1114,21 @@ class MainWindow:
                 state="normal" if play_enabled else "disabled",
             )
 
-        if job.status == "transcribing" and job.estimated_seconds:
-            fraction = min(0.99, (elapsed or 0.0) / job.estimated_seconds)
-            row.progress_bar.stop()
-            row.progress_bar.configure(mode="determinate")
-            row.progress_bar["value"] = fraction * 100
-            remaining = max(0.0, job.estimated_seconds - (elapsed or 0.0))
-            row.detail_label.configure(text=f"{round(fraction * 100)}% - ~{format_seconds(remaining)} left")
+        if job.status == "transcribing":
+            view = self._progress_view(job, elapsed or 0.0)
+            if view["fraction"] is None:
+                row.progress_bar.configure(mode="indeterminate")
+                row.progress_bar.start(15)
+                row.detail_label.configure(text="Transcribing…")
+            else:
+                row.progress_bar.stop()
+                row.progress_bar.configure(mode="determinate")
+                row.progress_bar["value"] = view["fraction"] * 100
+                row.detail_label.configure(text=self._transcribe_detail_text(job, view))
         elif job.status == "loading model":
             row.progress_bar.configure(mode="indeterminate")
             row.progress_bar.start(15)
-            row.detail_label.configure(text="loading model...")
+            row.detail_label.configure(text="Loading model…")
         elif job.status == "done":
             row.progress_bar.stop()
             row.progress_bar.configure(mode="determinate")
@@ -1110,23 +1183,41 @@ class MainWindow:
             self.progress_bar.configure(mode="indeterminate")
             self.progress_bar.start(15)
             self.progress_detail_var.set(
-                "Loading model - first use of a model downloads it and can take a while."
+                "Loading model into memory…  (a few seconds; the first use of a "
+                "model downloads it once and can take a while)"
             )
+            return
+
+        if job.status == "transcribing":
+            view = self._progress_view(job, elapsed)
+            if view["fraction"] is None:
+                self.progress_bar.configure(mode="indeterminate")
+                self.progress_bar.start(15)
+                self.progress_detail_var.set("Transcribing…  •  estimating progress")
+                return
+            self.progress_bar.stop()
+            self.progress_bar.configure(mode="determinate")
+            self.progress_bar["value"] = view["fraction"] * 100
+            eta = format_minutes_left(view["eta"])
+            if view["real"]:
+                parts = []
+                if view["timecode"]:
+                    parts.append(view["timecode"])
+                parts.append(f"{round(view['fraction'] * 100)}%")
+                if eta:
+                    parts.append(f"about {eta} left")
+                self.progress_detail_var.set("  •  ".join(parts))
+            else:
+                detail = "Estimating progress"
+                if eta:
+                    detail += f"  •  about {eta} left"
+                self.progress_detail_var.set(detail)
             return
 
         self.progress_bar.stop()
         self.progress_bar.configure(mode="determinate")
-        if job.estimated_seconds:
-            fraction = min(0.99, elapsed / job.estimated_seconds)
-            self.progress_bar["value"] = fraction * 100
-            remaining = max(0.0, job.estimated_seconds - elapsed)
-            self.progress_detail_var.set(
-                f"{round(fraction * 100)}%  •  ~{format_seconds(remaining)} remaining "
-                f"(est. {format_seconds(job.estimated_seconds)} total, {format_seconds(elapsed)} elapsed)"
-            )
-        else:
-            self.progress_bar["value"] = 0
-            self.progress_detail_var.set(f"{format_seconds(elapsed)} elapsed - estimating...")
+        self.progress_bar["value"] = 0
+        self.progress_detail_var.set(f"{format_seconds(elapsed)} elapsed")
 
     def _refresh_history(self) -> None:
         self.history_tree.delete(*self.history_tree.get_children())

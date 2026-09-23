@@ -27,6 +27,17 @@ class Job:
     stop_event: threading.Event = field(default_factory=threading.Event)
     audio_duration_seconds: float | None = None
     estimated_seconds: float | None = None
+    # Real transcription progress in [0, 1] - how far through the audio the
+    # engine has actually processed, reported per chunk (see engine/worker).
+    # `None` until the first real update arrives (or when the backend can't
+    # report it, e.g. a short un-chunked file), where the UI falls back to the
+    # duration-based time estimate instead. `transcribe_fraction` is the
+    # OVERALL bar value ((done_tracks + current)/N for multi-track);
+    # `transcribe_position_fraction` is the position within the current
+    # track/call, used to show a "12:30 / 41:05" timecode. For a single track
+    # the two are equal.
+    transcribe_fraction: float | None = None
+    transcribe_position_fraction: float | None = None
     started_at: datetime | None = None
     elapsed_seconds: float | None = None
     output_path: Path | None = None

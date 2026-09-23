@@ -26,7 +26,12 @@ def run_engine(request_queue: "Queue", response_queue: "Queue") -> None:
         try:
             ensure_model_loaded(model_name)
             response_queue.put(("phase", job_id, "transcribing"))
-            segments = transcribe_mp3_segments(model_name, Path(mp3_path), language=language)
+            segments = transcribe_mp3_segments(
+                model_name,
+                Path(mp3_path),
+                language=language,
+                progress_callback=lambda fraction: response_queue.put(("progress", job_id, fraction)),
+            )
             response_queue.put(("result", job_id, segments))
         except Exception as exc:  # noqa: BLE001 - reported back, not swallowed
             response_queue.put(("error", job_id, type(exc).__name__, str(exc)))

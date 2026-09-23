@@ -9,6 +9,7 @@ import threading
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from app.engine import run_engine
 from app.jobs import Job, WorkerEvent
@@ -82,7 +83,19 @@ class TranscriptionWorker(threading.Thread):
                 self.engine_process.join(timeout=2)
         self.engine_process = None
 
-    def _transcribe_via_engine(self, job: Job, mp3_path: Path) -> list[TranscribedSegment]:
+    def _transcribe_via_engine(
+        self,
+        job: Job,
+        mp3_path: Path,
+        on_progress: "Callable[[float], None] | None" = None,
+    ) -> list[TranscribedSegment]:
+        """Transcribe one mp3 via the engine process.
+
+        `on_progress` receives a fraction in [0, 1] of *this mp3* processed so
+        far, as the engine reports it. Callers translate that into the job's
+        overall bar value (identity for single-track; (done + frac)/N for
+        multi-track).
+        """
         self._ensure_engine_running()
         self.request_queue.put((job.id, job.model, mp3_path, job.language))
 
@@ -101,6 +114,9 @@ class TranscriptionWorker(threading.Thread):
             if kind == "phase":
                 job.status = message[2]
                 self._emit(job)
+            elif kind == "progress":
+                if on_progress is not None:
+                    on_progress(float(message[2]))
             elif kind == "result":
                 return message[2]
             elif kind == "error":
@@ -111,6 +127,8 @@ class TranscriptionWorker(threading.Thread):
     def _process(self, job: Job) -> None:
         started_at = datetime.now()
         job.started_at = started_at
+        job.transcribe_fraction = None
+        job.transcribe_position_fraction = None
         start_monotonic = time.monotonic()
         temp_dir: Path | None = None
 
@@ -183,7 +201,13 @@ class TranscriptionWorker(threading.Thread):
 
                 job.status = "loading model"
                 self._emit(job)
-                segments = self._transcribe_via_engine(job, mp3_path)
+
+                def on_progress(fraction: float) -> None:
+                    job.transcribe_fraction = fraction
+                    job.transcribe_position_fraction = fraction
+                    self._emit(job)
+
+                segments = self._transcribe_via_engine(job, mp3_path, on_progress)
                 text = " ".join(seg.text for seg in segments).strip()
                 transcript_text = text + ("\n" if text else "")
                 speakers_detected = None
@@ -261,7 +285,14 @@ class TranscriptionWorker(threading.Thread):
             job.status = "loading model" if i == 0 else "transcribing"
             job.status_detail = f"track {i + 1}/{total} - {name}"
             self._emit(job)
-            segments = self._transcribe_via_engine(job, track_mp3)
+
+            def on_progress(fraction: float, i=i) -> None:
+                # Overall bar spans all tracks; position is within this track.
+                job.transcribe_fraction = (i + fraction) / total
+                job.transcribe_position_fraction = fraction
+                self._emit(job)
+
+            segments = self._transcribe_via_engine(job, track_mp3, on_progress)
             labeled_segments.extend(
                 dialogue.Segment(speaker=name, start=seg.start, end=seg.end, text=seg.text)
                 for seg in segments

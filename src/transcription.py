@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+
+# Called during transcription with a fraction in [0, 1] of the audio processed
+# so far. Not every backend can report it (see `transcribe_mp3_segments`).
+ProgressCallback = Callable[[float], None]
 
 
 @dataclass
@@ -78,7 +82,10 @@ def ensure_model_loaded(model_name: str) -> None:
 
 
 def transcribe_mp3_segments(
-    model_name: str, audio_path: Path, language: str | None = None
+    model_name: str,
+    audio_path: Path,
+    language: str | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> list[TranscribedSegment]:
     """Transcribe, keeping per-segment/sentence timestamps.
 
@@ -86,9 +93,15 @@ def transcribe_mp3_segments(
     `src.dialogue`) and multi-track/interruption merging work. The worker
     joins segment text back into plain paragraphs for single-track jobs, and
     into speaker-labeled blocks for multi-track jobs.
+
+    `progress_callback`, if given, is invoked with a fraction in [0, 1] of the
+    audio processed so far. Only the Parakeet backend reports it (and only for
+    files long enough to be chunked); mlx-whisper's transcribe() exposes no
+    progress hook, so the callback simply never fires there and the caller
+    falls back to a time estimate.
     """
     if _is_parakeet_model(model_name):
-        return _transcribe_with_parakeet(model_name, audio_path)
+        return _transcribe_with_parakeet(model_name, audio_path, progress_callback)
 
     ensure_mlx_whisper_available()
     import mlx_whisper
@@ -117,16 +130,29 @@ _PARAKEET_CHUNK_DURATION_SECONDS = 120.0
 _PARAKEET_CHUNK_OVERLAP_SECONDS = 15.0
 
 
-def _transcribe_with_parakeet(model_name: str, audio_path: Path) -> list[TranscribedSegment]:
+def _transcribe_with_parakeet(
+    model_name: str, audio_path: Path, progress_callback: ProgressCallback | None = None
+) -> list[TranscribedSegment]:
     # Parakeet is multilingual and auto-detects the spoken language itself -
     # unlike mlx_whisper.transcribe(), parakeet_mlx's transcribe() takes no
     # language parameter to force one, so `language` isn't threaded through
     # here (the app-level language picker is simply a no-op for this model).
     model = _get_parakeet_model(model_name)
+
+    # parakeet-mlx calls this with (current_sample, total_samples) before each
+    # chunk. Only fires when the file is long enough to be chunked; short
+    # files return in one pass and the caller keeps its time-estimate bar.
+    chunk_callback = None
+    if progress_callback is not None:
+        def chunk_callback(current: int, total: int) -> None:
+            if total > 0:
+                progress_callback(max(0.0, min(1.0, current / total)))
+
     result = model.transcribe(
         audio_path,
         chunk_duration=_PARAKEET_CHUNK_DURATION_SECONDS,
         overlap_duration=_PARAKEET_CHUNK_OVERLAP_SECONDS,
+        chunk_callback=chunk_callback,
     )
     return [
         TranscribedSegment(start=float(sentence.start), end=float(sentence.end), text=sentence.text.strip())

@@ -4,3 +4,9 @@
       audio not yet verified end-to-end. Covered by automated tests (32 passing
       via `pytest` from the project root), but not exercised through the app UI.
       See updates/2026-09-02 multi-speaker-transcripts - CLOSED/update v1.md.
+
+- [ ] Real transcription progress works for Parakeet (chunk_callback) but NOT
+      for the mlx-whisper backend, which has no progress hook and stays on the
+      time-estimate bar. Real Whisper progress would require chunking the audio
+      ourselves (quality tradeoff at chunk boundaries). See
+      updates/2026-09-23 transcription-progress - CLOSED/.
