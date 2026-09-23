@@ -192,11 +192,18 @@ lagged-xcorr direction test is reused by the classifier).
   the design above.
 - 2026-09-23: **Phase 0 spike done → GO.** Directional detection reliable
   (0/60 clean false positives; user's 3-track case nailed). Thresholds set.
-- 2026-09-23: **Real-recording analysis → task re-scoped.** User clarified the
-  setup; verified the true structure on the real call (`spike/subtract_probe.py`,
-  `spike/verify_speakers.py`): s3 = clean single voice, s1 = s3 + local speaker
-  (unity gain, zero lag), s2 ≈ s1 duplicate. **`s1 − s3` (g=0.999) cleanly
-  isolates the other speaker** — proven by transcribing the residual (host's
-  questions, absent from s3). Real task = **speaker isolation by reference
-  subtraction**, not acoustic bleed. Roadmap revised (see ⟳ Plan revision).
-  **Next: Phase 1 — `src/track_separation.py` classifier.** Building now.
+- 2026-09-23: **Real-recording analysis → task re-scoped.** Verified true
+  structure: s3 = clean voice, s1 = s3 + local speaker (unity gain, zero lag),
+  s2 ≈ s1 dup. `s1 − s3` (g=0.999) cleanly isolates the other speaker (proven by
+  transcribing the residual). Built `src/track_separation.py` (classify + isolate
+  + gate + render, 9 tests).
+- 2026-09-23: **RNNoise denoise added** (`denoise_pcm` via ffmpeg `arnndn`; model
+  fetched, gitignored; 11 tests). User confirmed isolated+denoised audio "quite
+  good".
+- 2026-09-23: **Tested classifier on 5 real recordings → auto-classification NOT
+  reliable** (2 of 5 wrong; Michal K genuinely ambiguous — see `wiki.md` table).
+  **PIVOT (user-directed): drop auto-classification, give the user manual control
+  with great UX** — per track: include/exclude, name, language, noise filter,
+  and declare subtractions. Engine primitives stay as the backend. **Two UX-pro
+  agents designing the panel + subtraction interaction. Next: synthesize → build
+  the manual multi-track control UI + wire per-track controls into Job/worker.**

@@ -271,6 +271,46 @@ source** for their active regions, and merge by timestamp. Avoids residual-ASR
 entirely for the common case. The `isolate()`/`noise_gate()` code stays useful
 for the VAD signal and for genuine-overlap fallback.
 
+## Reliability test across 5 real recordings (2026-09-23) → PIVOT to manual control
+Tested `classify_tracks` on 5 real OBS sales calls. Every one has 3 stereo tracks
+where **T3 is a low-activity (~0.3) clean remote/client track** and **T1/T2 are
+high-activity (~0.75) full-conversation mixes** — but the mixes are balanced
+differently per recording, so their correlation swings wildly (0.70–0.98):
+
+| recording   | corr(T1,T2) | corr(T1,T3) | auto-plan result        | correct? |
+|-------------|-------------|-------------|-------------------------|----------|
+| Miroslav    | 0.98        | 0.99        | keep3 / isolate1 / dup2 | ✅ (2 spk) |
+| Frantisek   | 0.98        | 0.42        | keep1 / dup2 / keep3    | ✅ (2 spk) |
+| Michal Sebo | 0.95        | 0.67        | keep1 / dup2 / keep3    | ✅ (2 spk) |
+| Marek       | 0.81        | 0.78        | keep3 / isolate1 / keep2| ✗ (3 spk) |
+| Michal K    | 0.70        | 0.99        | keep3 / isolate1 / keep2| ✗ (3 spk, ambiguous) |
+
+Michal K is genuinely ambiguous even under careful analysis: T1 ≈ client
+(corr 0.99, 17.7 dB subtractable) yet also has host-solo activity; corr(T1−T3,
+T2−T3)=0.24 (the two mixes' residuals are NOT the same signal). No simple,
+safe universal rule separates "mix that reduces to the host" from "track that is
+≈ a copy of the client" across all five.
+
+**Decision (user-directed): drop auto-classification; give the user manual
+control with great UX.** The user can tell who's who by listening. This is the
+robust answer — it sidesteps the unsolved classification problem entirely.
+
+`classify_tracks` is demoted to an optional *suggestion* (may still power a
+"suggested setup" hint later), NOT the source of truth. The engine primitives
+(`isolate`, `denoise_pcm`, `noise_gate`, `render_speaker_wav`) are exactly what
+the manual controls drive — nothing wasted.
+
+### Manual-control feature set (user-specified)
+Per track, the user can: include/exclude it, **name** it (→ speaker label),
+set its **language**, toggle a **noise filter** (RNNoise), and declare a
+**subtraction** ("remove Track B's voice from Track A"). Two UX-pro agents are
+designing the panel + the subtraction interaction.
+
+### RNNoise denoise — DONE
+`denoise_pcm` uses ffmpeg `arnndn` (RNNoise, model `bd.rnnn`), no new Python dep,
+model fetched via `scripts/fetch_rnnoise_model.sh` (gitignored, no-ops if absent).
+User confirmed the isolated+denoised audio quality is "quite good".
+
 ## Open questions / risks
 - **Detection reliability is the whole feature's gate** (Phase 0). If we can't
   detect direction + confidence robustly, safe-by-default is impossible → stop.
