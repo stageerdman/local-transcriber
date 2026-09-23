@@ -7,33 +7,31 @@ from src.playback import TrackPlayer
 
 
 class FakeProcess:
-    """Stand-in for subprocess.Popen whose exit is driven by the test."""
-
-    def __init__(self) -> None:
+    def __init__(self, cmd):
+        self.cmd = cmd
         self._done = threading.Event()
         self.terminated = False
 
-    def wait(self) -> int:
+    def wait(self):
         self._done.wait(timeout=5)
         return 0
 
-    def poll(self) -> int | None:
+    def poll(self):
         return 0 if self._done.is_set() else None
 
-    def terminate(self) -> None:
+    def terminate(self):
         self.terminated = True
         self._done.set()
 
-    def finish(self) -> None:
-        """Simulate the audio playing to its natural end."""
+    def finish(self):
         self._done.set()
 
 
-def _patch_popen(monkeypatch) -> list[FakeProcess]:
-    created: list[FakeProcess] = []
+def _patch_popen(monkeypatch):
+    created = []
 
     def fake_popen(cmd, **kwargs):
-        proc = FakeProcess()
+        proc = FakeProcess(cmd)
         created.append(proc)
         return proc
 
@@ -41,11 +39,22 @@ def _patch_popen(monkeypatch) -> list[FakeProcess]:
     return created
 
 
-def test_play_starts_a_process(monkeypatch):
+def _wait_until(predicate, timeout=5.0):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end and not predicate():
+        time.sleep(0.01)
+
+
+def test_play_builds_ffplay_command_and_marks_playing(monkeypatch):
     created = _patch_popen(monkeypatch)
     player = TrackPlayer()
-    player.play(Path("a.mp3"))
+    player.play(Path("a.mov"), audio_index=1, channel_index=0, start_seconds=12.5)
     assert len(created) == 1
+    cmd = created[0].cmd
+    assert cmd[0] == "ffplay"
+    assert "-ast" in cmd and "a:1" in cmd            # audio-relative stream select
+    assert "-ss" in cmd and "12.500" in cmd          # seek offset
+    assert "pan=mono|c0=c0" in cmd                    # channel isolation
     assert player.is_playing()
 
 
@@ -53,51 +62,54 @@ def test_natural_finish_fires_on_finish_once(monkeypatch):
     created = _patch_popen(monkeypatch)
     calls = []
     player = TrackPlayer()
-    player.play(Path("a.mp3"), on_finish=lambda: calls.append(1))
+    player.play(Path("a.mov"), on_finish=lambda: calls.append(1))
 
     created[0].finish()
     _wait_until(lambda: not player.is_playing())
 
     assert calls == [1]
-    assert not player.is_playing()
+    assert player.position() is None
 
 
 def test_stop_terminates_and_suppresses_on_finish(monkeypatch):
     created = _patch_popen(monkeypatch)
     calls = []
     player = TrackPlayer()
-    player.play(Path("a.mp3"), on_finish=lambda: calls.append(1))
+    player.play(Path("a.mov"), on_finish=lambda: calls.append(1))
 
     player.stop()
 
     assert created[0].terminated
     assert not player.is_playing()
-    # An explicit stop must not fire the natural-finish callback - give the
-    # watcher thread a moment to run and confirm it stays silent.
     time.sleep(0.05)
     assert calls == []
 
 
-def test_second_play_supersedes_first_without_firing_its_callback(monkeypatch):
+def test_seek_supersedes_without_firing_previous_callback(monkeypatch):
     created = _patch_popen(monkeypatch)
-    first_calls = []
-    second_calls = []
+    first, second = [], []
     player = TrackPlayer()
-    player.play(Path("a.mp3"), on_finish=lambda: first_calls.append(1))
-    player.play(Path("b.mp3"), on_finish=lambda: second_calls.append(1))
+    player.play(Path("a.mov"), start_seconds=0.0, on_finish=lambda: first.append(1))
+    player.play(Path("a.mov"), start_seconds=30.0, on_finish=lambda: second.append(1))
 
-    # Starting the second playback should have stopped the first.
     assert created[0].terminated
     assert len(created) == 2
+    assert "30.000" in created[1].cmd
 
     created[1].finish()
     _wait_until(lambda: not player.is_playing())
 
-    assert first_calls == []  # superseded playback never fires
-    assert second_calls == [1]
+    assert first == []
+    assert second == [1]
 
 
-def _wait_until(predicate, timeout: float = 5.0) -> None:
-    end = time.monotonic() + timeout
-    while time.monotonic() < end and not predicate():
-        time.sleep(0.01)
+def test_position_tracks_from_seek_point(monkeypatch):
+    _patch_popen(monkeypatch)
+    player = TrackPlayer()
+    player.play(Path("a.mov"), start_seconds=10.0)
+    # Position starts at the seek offset and advances by wall clock.
+    assert player.position() is not None and player.position() >= 10.0
+    time.sleep(0.2)
+    assert player.position() >= 10.2
+    player.stop()
+    assert player.position() is None

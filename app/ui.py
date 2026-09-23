@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import json
 import queue
-import shutil
 import sqlite3
-import tempfile
 import threading
 import tkinter as tk
 from dataclasses import dataclass, field
@@ -18,8 +16,6 @@ from src.audio_tracks import (
     AudioStream,
     compute_volume_envelope,
     correlation,
-    extract_channel_to_mp3,
-    extract_track_to_mp3,
     safe_probe_audio_streams,
     track_speaker_names,
 )
@@ -61,6 +57,13 @@ ICON_START = "▶"
 ICON_STOP = "■"
 ICON_RESET = "↻"
 ICON_BUSY = "…"
+
+# Waveform / seek-bar colors (readable in both light and dark themes).
+WAVEFORM_UNPLAYED = "#9aa0a6"
+WAVEFORM_PLAYED = "#4c6ef5"
+WAVEFORM_PLAYHEAD = "#f03e3e"
+WAVEFORM_TIME = "#868e96"
+WAVEFORM_HEIGHT = 24
 
 
 def _load_settings() -> dict:
@@ -154,13 +157,20 @@ class MainWindow:
         # instead of hardcoding a light color that clashes in dark mode.
         self.canvas_bg = ttk.Style().lookup("TFrame", "background") or root.cget("bg")
 
-        # Track preview playback: one track audible at a time, extracted to a
-        # temp mp3 on demand and played via afplay. `_playing` is the
-        # (job_id, stream_index) currently playing or being extracted.
+        # Track preview playback: one track audible at a time, played (and
+        # seeked) straight from the source via ffplay - no extraction step.
         self._player = TrackPlayer()
+        # (job_id, stream_index) of the track currently playing, or None.
         self._playing: tuple[int, int] | None = None
-        self._preview_dir: Path | None = None
-        self._preview_files: dict[tuple[int, int, int | None], Path] = {}
+        # Playhead per track as a fraction [0, 1] of its duration. Persists
+        # after stop so ▶ resumes where it left off; reset to 0 when another
+        # track takes over.
+        self._playhead: dict[tuple[int, int], float] = {}
+        # While dragging on a waveform to scrub: the track key and the fraction
+        # under the cursor. Audio is (re)started on mouse release.
+        self._scrub_key: tuple[int, int] | None = None
+        self._scrub_fraction: float = 0.0
+        self._playhead_tick()
 
         root.title("Local Transcriber")
         root.geometry("900x600")
@@ -632,11 +642,27 @@ class MainWindow:
                 )
                 row.channel_combos[stream.index] = channel_combo
 
-            canvas = tk.Canvas(track_row, height=18, bg=self.canvas_bg, highlightthickness=0)
+            canvas = tk.Canvas(
+                track_row,
+                height=WAVEFORM_HEIGHT,
+                bg=self.canvas_bg,
+                highlightthickness=1,
+                highlightbackground=self.canvas_bg,
+                highlightcolor=WAVEFORM_PLAYED,
+                takefocus=1,
+            )
             canvas.pack(side="left", fill="x", expand=True)
             canvas._envelope = self._representative_envelope(job, stream)
             canvas.bind("<Configure>", lambda _e, c=canvas: self._draw_envelope(c))
+            canvas.bind("<Button-1>", lambda e, s=stream: self._on_waveform_press(job, s, e))
+            canvas.bind("<B1-Motion>", lambda e, s=stream: self._on_waveform_drag(job, s, e))
+            canvas.bind("<ButtonRelease-1>", lambda e, s=stream: self._on_waveform_release(job, s, e))
+            canvas.bind("<Left>", lambda _e, s=stream: self._nudge_playhead(job, s, -5.0))
+            canvas.bind("<Right>", lambda _e, s=stream: self._nudge_playhead(job, s, 5.0))
+            canvas.bind("<space>", lambda _e, s=stream: (self._on_track_play(job, s), "break")[1])
             row.track_canvases[stream.index] = canvas
+            self._set_canvas_enabled(canvas, job.status == "ready" and TrackPlayer.available())
+            self._redraw_track(job, stream.index)
 
     def _channel_mode_label(self, job: Job, stream: AudioStream) -> str:
         channel_index = (job.selected_channel_by_track or {}).get(stream.index)
@@ -653,70 +679,132 @@ class MainWindow:
         else:
             job.selected_channel_by_track.pop(stream_index, None)
         # A preview of this track is now playing the wrong channel - stop it
-        # rather than trying to hot-swap the audio mid-play.
+        # rather than trying to hot-swap the audio mid-play. The playhead stays,
+        # so ▶ resumes at the same spot on the newly-chosen channel.
         if self._playing == (job.id, stream_index):
             self._stop_playback()
         self._redraw_track(job, stream_index)
 
     # -- track preview playback -----------------------------------------------
 
-    def _on_track_play(self, job: Job, stream: AudioStream) -> None:
-        # Click on the track that's already playing = stop it.
-        if self._playing == (job.id, stream.index):
-            self._stop_playback()
-            return
-        # Otherwise stop whatever else was playing and start this one.
-        self._stop_playback()
-        if not TrackPlayer.available():
-            return
-        self._playing = (job.id, stream.index)
-        # Show "busy" while the track is extracted; disable so a double-click
-        # can't kick off a second extraction of the same track.
-        self._set_play_button(job.id, stream.index, ICON_BUSY, enabled=False)
+    def _audio_index(self, job: Job, stream: AudioStream) -> int:
+        """ffplay's `-ast a:N` index - this stream's position among the file's
+        audio streams, which is exactly its position in job.tracks."""
+        for i, s in enumerate(job.tracks or []):
+            if s.index == stream.index:
+                return i
+        return 0
 
-        channel_index = (job.selected_channel_by_track or {}).get(stream.index)
-
-        def extract() -> None:
+    def _job_duration(self, job: Job) -> float:
+        """Recording length in seconds, probed lazily if not known yet."""
+        if job.audio_duration_seconds is None:
             try:
-                path = self._preview_file(job, stream, channel_index)
+                job.audio_duration_seconds = probe_duration_seconds(job.source_path)
             except Exception:
-                path = None
-            self.root.after(0, lambda: self._begin_afplay(job, stream, channel_index, path))
+                job.audio_duration_seconds = 0.0
+        return job.audio_duration_seconds or 0.0
 
-        threading.Thread(target=extract, daemon=True).start()
+    def _on_track_play(self, job: Job, stream: AudioStream) -> None:
+        """Play/stop button: stop if this track is playing, else (re)start it
+        from its current playhead (so it acts like resume)."""
+        key = (job.id, stream.index)
+        if self._playing == key:
+            self._stop_playback()  # playhead is left in place so ▶ resumes
+            return
+        self._start_playback(job, stream, self._playhead.get(key, 0.0))
 
-    def _begin_afplay(
-        self, job: Job, stream: AudioStream, channel_index: int | None, path: Path | None
-    ) -> None:
-        # The user may have stopped (or started another track) while this one
-        # was still extracting - if so, don't start playing.
-        if self._playing != (job.id, stream.index):
+    def _start_playback(self, job: Job, stream: AudioStream, fraction: float) -> None:
+        if job.status != "ready" or not TrackPlayer.available():
             return
-        if path is None:
-            self._playing = None
-            self._set_play_button(job.id, stream.index, ICON_START, enabled=True)
-            return
+        # Only one track is audible at a time, but each track keeps its own
+        # playhead, so you can jump between tracks and resume each where you
+        # left off.
+        self._stop_playback()
+        key = (job.id, stream.index)
+        fraction = max(0.0, min(0.999, fraction))
+        self._playhead[key] = fraction
+        self._playing = key
+        duration = self._job_duration(job)
         self._player.play(
-            path,
+            job.source_path,
+            audio_index=self._audio_index(job, stream),
+            channel_index=(job.selected_channel_by_track or {}).get(stream.index),
+            start_seconds=fraction * duration,
             on_finish=lambda: self.root.after(
                 0, lambda: self._on_playback_finished(job.id, stream.index)
             ),
         )
         self._set_play_button(job.id, stream.index, ICON_STOP, enabled=True)
+        self._redraw_track(job, stream.index)
 
     def _on_playback_finished(self, job_id: int, stream_index: int) -> None:
         if self._playing != (job_id, stream_index):
             return  # already superseded/stopped
         self._playing = None
+        self._playhead.pop((job_id, stream_index), None)  # played to the end
         self._set_play_button(job_id, stream_index, ICON_START, enabled=True)
+        self._redraw_track_by_id(job_id, stream_index)
 
     def _stop_playback(self) -> None:
+        """Stop audio but leave the playhead where it is (so ▶ resumes)."""
         if self._playing is None:
             return
         job_id, stream_index = self._playing
         self._playing = None
         self._player.stop()
         self._set_play_button(job_id, stream_index, ICON_START, enabled=True)
+        self._redraw_track_by_id(job_id, stream_index)
+
+    def _clear_job_playheads(self, job_id: int) -> None:
+        for key in [k for k in self._playhead if k[0] == job_id]:
+            self._playhead.pop(key, None)
+            self._redraw_track_by_id(*key)
+
+    # -- waveform seeking / scrubbing -----------------------------------------
+
+    def _fraction_at(self, canvas: tk.Canvas, x: int) -> float:
+        width = canvas.winfo_width()
+        if width <= 1:
+            return 0.0
+        return max(0.0, min(0.999, x / width))
+
+    def _on_waveform_press(self, job: Job, stream: AudioStream, event) -> None:
+        if job.status != "ready" or not TrackPlayer.available():
+            return
+        event.widget.focus_set()
+        # Silence any current audio while scrubbing; playback (re)starts on
+        # release, so dragging doesn't thrash ffplay with a restart per pixel.
+        self._player.stop()
+        self._playing = None
+        self._scrub_key = (job.id, stream.index)
+        self._scrub_fraction = self._fraction_at(event.widget, event.x)
+        self._playhead[self._scrub_key] = self._scrub_fraction
+        self._set_play_button(job.id, stream.index, ICON_START, enabled=True)
+        self._redraw_track(job, stream.index)
+
+    def _on_waveform_drag(self, job: Job, stream: AudioStream, event) -> None:
+        if self._scrub_key != (job.id, stream.index):
+            return
+        self._scrub_fraction = self._fraction_at(event.widget, event.x)
+        self._playhead[self._scrub_key] = self._scrub_fraction
+        self._redraw_track(job, stream.index)
+
+    def _on_waveform_release(self, job: Job, stream: AudioStream, event) -> None:
+        if self._scrub_key != (job.id, stream.index):
+            return
+        fraction = self._scrub_fraction
+        self._scrub_key = None
+        self._start_playback(job, stream, fraction)
+
+    def _nudge_playhead(self, job: Job, stream: AudioStream, delta_seconds: float) -> str:
+        # Keyboard seek (Left/Right when the waveform is focused).
+        if job.status != "ready" or not TrackPlayer.available():
+            return "break"
+        key = (job.id, stream.index)
+        duration = self._job_duration(job) or 1.0
+        current = self._playhead.get(key, 0.0) * duration
+        self._start_playback(job, stream, (current + delta_seconds) / duration)
+        return "break"
 
     def _set_play_button(self, job_id: int, stream_index: int, icon: str, enabled: bool) -> None:
         row = self.rows.get(job_id)
@@ -734,34 +822,37 @@ class MainWindow:
         except tk.TclError:
             pass
 
-    def _preview_file(self, job: Job, stream: AudioStream, channel_index: int | None) -> Path:
-        """Extract (once, then cache) the exact audio a track's preview should
-        play - the chosen single channel if the user pinned one, otherwise the
-        full-stream downmix, matching what the worker would transcribe."""
-        key = (job.id, stream.index, channel_index)
-        cached = self._preview_files.get(key)
-        if cached is not None and cached.exists():
-            return cached
-        if self._preview_dir is None:
-            self._preview_dir = Path(tempfile.mkdtemp(prefix="local-transcriber-preview-"))
-        suffix = f"j{job.id}-s{stream.index}" + (f"-c{channel_index}" if channel_index is not None else "")
-        output_path = self._preview_dir / f"{suffix}.mp3"
-        if channel_index is not None:
-            extract_channel_to_mp3(job.source_path, stream.index, channel_index, output_path)
-        else:
-            extract_track_to_mp3(job.source_path, stream.index, output_path)
-        self._preview_files[key] = output_path
-        return output_path
+    def _set_canvas_enabled(self, canvas: tk.Canvas, enabled: bool) -> None:
+        try:
+            if not canvas.winfo_exists():
+                return
+            canvas.configure(takefocus=1 if enabled else 0, cursor="hand2" if enabled else "")
+        except tk.TclError:
+            pass
+
+    def _redraw_track_by_id(self, job_id: int, stream_index: int) -> None:
+        job = self.jobs.get(job_id)
+        if job is not None:
+            self._redraw_track(job, stream_index)
+
+    def _playhead_tick(self) -> None:
+        """While a track plays, advance its playhead from the real ffplay
+        position and redraw. Runs continuously; near-free when idle."""
+        if self._playing is not None and self._scrub_key is None:
+            job_id, stream_index = self._playing
+            job = self.jobs.get(job_id)
+            position = self._player.position()
+            if job is not None and position is not None and (job.audio_duration_seconds or 0) > 0:
+                self._playhead[(job_id, stream_index)] = max(
+                    0.0, min(1.0, position / job.audio_duration_seconds)
+                )
+                self._redraw_track_by_id(job_id, stream_index)
+        self.root.after(100, self._playhead_tick)
 
     def shutdown(self) -> None:
-        """Stop any preview and remove the temp files it extracted - called
-        when the window closes."""
+        """Stop playback - called when the window closes."""
         self._player.stop()
         self._playing = None
-        if self._preview_dir is not None:
-            shutil.rmtree(self._preview_dir, ignore_errors=True)
-            self._preview_dir = None
-            self._preview_files.clear()
 
     def _representative_envelope(self, job: Job, stream: AudioStream) -> list[float] | None:
         """The single series drawn for a track's waveform: the one channel
@@ -789,7 +880,10 @@ class MainWindow:
             return
         canvas = row.track_canvases.get(stream_index)
         if canvas is not None:
+            key = (job.id, stream_index)
             canvas._envelope = self._representative_envelope(job, stream)
+            canvas._playhead = self._playhead.get(key)
+            canvas._duration = job.audio_duration_seconds or 0.0
             self._draw_envelope(canvas)
 
     def _ensure_envelopes_loaded(self, job: Job) -> None:
@@ -874,6 +968,8 @@ class MainWindow:
 
     def _draw_envelope(self, canvas: tk.Canvas) -> None:
         envelope = getattr(canvas, "_envelope", None)
+        playhead = getattr(canvas, "_playhead", None)
+        duration = getattr(canvas, "_duration", 0.0) or 0.0
         canvas.delete("all")
         canvas.configure(bg=self.canvas_bg)
         width = canvas.winfo_width()
@@ -881,18 +977,50 @@ class MainWindow:
         if width <= 1 or height <= 1:
             return
         mid = height / 2
+
         # Loading (None), silent, or single-sample: a flat mid-line reads as
         # "nothing here yet/nothing to see" without extra caption text.
         if not envelope or len(envelope) < 2 or max(envelope) <= 0:
-            canvas.create_line(0, mid, width, mid, fill="#8a8a8a")
-            return
-        n = len(envelope)
-        step = width / (n - 1)
-        points: list[float] = []
-        for i, level in enumerate(envelope):
-            points.append(i * step)
-            points.append(mid - level * (mid - 1))
-        canvas.create_line(*points, fill="#4c6ef5", width=1.5, smooth=True)
+            canvas.create_line(0, mid, width, mid, fill=WAVEFORM_UNPLAYED)
+        else:
+            n = len(envelope)
+            step = width / (n - 1)
+            points: list[float] = []
+            for i, level in enumerate(envelope):
+                points.append(i * step)
+                points.append(mid - level * (mid - 1))
+            # Whole waveform muted first...
+            canvas.create_line(*points, fill=WAVEFORM_UNPLAYED, width=1.5, smooth=True)
+            # ...then redraw the already-played part (left of the playhead) in
+            # the accent color so progress through the track reads at a glance.
+            if playhead is not None and playhead > 0:
+                play_x = playhead * width
+                played: list[float] = []
+                for i, level in enumerate(envelope):
+                    x = i * step
+                    if x > play_x:
+                        break
+                    played.append(x)
+                    played.append(mid - level * (mid - 1))
+                if len(played) >= 4:
+                    canvas.create_line(*played, fill=WAVEFORM_PLAYED, width=1.5, smooth=True)
+
+        # Playhead line + a small cap at the top that reads as a grabbable handle.
+        if playhead is not None:
+            x = max(1, min(width - 1, playhead * width))
+            canvas.create_line(x, 0, x, height, fill=WAVEFORM_PLAYHEAD, width=1)
+            canvas.create_oval(x - 3, 0, x + 3, 6, fill=WAVEFORM_PLAYHEAD, outline=WAVEFORM_PLAYHEAD)
+
+        # Position / duration, tucked into the bottom-right corner.
+        if duration > 0:
+            if playhead is not None:
+                label = f"{format_timecode(playhead * duration)} / {format_timecode(duration)}"
+            else:
+                label = format_timecode(duration)
+            canvas.create_text(
+                width - 3, height - 1, text=label, anchor="se",
+                fill=WAVEFORM_TIME, font=("TkDefaultFont", 8),
+            )
 
     def _on_track_toggle(self, job: Job, stream_index: int, var: tk.BooleanVar) -> None:
         if job.selected_track_indices is None:
@@ -1102,10 +1230,12 @@ class MainWindow:
         for channel_combo in row.channel_combos.values():
             channel_combo.configure(state="readonly" if job.status == "ready" else "disabled")
         # Previewing shares the same source file/CPU as transcription, so a
-        # job leaving "ready" (Start clicked) stops any preview of it and
-        # greys its play buttons - re-enabled once it's back to "ready".
+        # job leaving "ready" (Start clicked) stops any preview of it, clears
+        # its playheads, and greys its play buttons - re-enabled when "ready".
         if job.status != "ready" and self._playing is not None and self._playing[0] == job.id:
             self._stop_playback()
+        if job.status != "ready":
+            self._clear_job_playheads(job.id)
         play_enabled = job.status == "ready" and TrackPlayer.available()
         for stream_index, play_button in row.track_play_buttons.items():
             is_playing = self._playing == (job.id, stream_index)
@@ -1113,6 +1243,9 @@ class MainWindow:
                 text=ICON_STOP if is_playing else ICON_START,
                 state="normal" if play_enabled else "disabled",
             )
+            canvas = row.track_canvases.get(stream_index)
+            if canvas is not None:
+                self._set_canvas_enabled(canvas, play_enabled)
 
         if job.status == "transcribing":
             view = self._progress_view(job, elapsed or 0.0)
