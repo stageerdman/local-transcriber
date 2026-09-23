@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import queue
+import shutil
 import sqlite3
+import tempfile
 import threading
 import tkinter as tk
 from dataclasses import dataclass, field
@@ -16,6 +18,8 @@ from src.audio_tracks import (
     AudioStream,
     compute_volume_envelope,
     correlation,
+    extract_channel_to_mp3,
+    extract_track_to_mp3,
     safe_probe_audio_streams,
     track_speaker_names,
 )
@@ -24,6 +28,7 @@ from src.converter import check_ffmpeg_installed
 from src.duration import probe_duration_seconds
 from src.file_pickers import pick_files, pick_folder
 from src.media_finder import SUPPORTED_EXTENSIONS, find_media_files
+from src.playback import TrackPlayer
 from src.transcription import ensure_mlx_whisper_available
 
 try:
@@ -98,6 +103,8 @@ class RowWidgets:
     tracks_container: ttk.Frame
     track_checkbuttons: list[ttk.Checkbutton] = field(default_factory=list)
     channel_combos: dict[int, ttk.Combobox] = field(default_factory=dict)
+    # One preview play/stop button per track (keyed by AudioStream.index).
+    track_play_buttons: dict[int, ttk.Button] = field(default_factory=dict)
     # One waveform canvas per track (AudioStream.index) - shows whichever
     # channel(s) that track is currently set to use, even if it has more
     # than one underlying channel.
@@ -123,6 +130,14 @@ class MainWindow:
         # Match the waveform canvas background to the current ttk theme
         # instead of hardcoding a light color that clashes in dark mode.
         self.canvas_bg = ttk.Style().lookup("TFrame", "background") or root.cget("bg")
+
+        # Track preview playback: one track audible at a time, extracted to a
+        # temp mp3 on demand and played via afplay. `_playing` is the
+        # (job_id, stream_index) currently playing or being extracted.
+        self._player = TrackPlayer()
+        self._playing: tuple[int, int] | None = None
+        self._preview_dir: Path | None = None
+        self._preview_files: dict[tuple[int, int, int | None], Path] = {}
 
         root.title("Local Transcriber")
         root.geometry("900x600")
@@ -508,6 +523,7 @@ class MainWindow:
         row.track_checkbuttons = []
         row.channel_combos = {}
         row.track_canvases = {}
+        row.track_play_buttons = {}
 
         tracks = job.tracks
         if tracks is None:
@@ -533,6 +549,20 @@ class MainWindow:
             track_row = ttk.Frame(row.tracks_container)
             track_row.pack(fill="x", pady=1)
             self._bind_mousewheel(track_row)
+
+            # Leading, fixed-position preview button so every row's play
+            # target lines up regardless of whether a channel picker is shown.
+            is_playing = self._playing == (job.id, stream.index)
+            play_button = ttk.Button(
+                track_row,
+                text=ICON_STOP if is_playing else ICON_START,
+                width=2,
+                command=lambda s=stream: self._on_track_play(job, s),
+            )
+            play_enabled = job.status == "ready" and TrackPlayer.available()
+            play_button.configure(state="normal" if play_enabled else "disabled")
+            play_button.pack(side="left", padx=(0, 6))
+            row.track_play_buttons[stream.index] = play_button
 
             dup_source = duplicate_of.get(stream.index)
             label_text = name
@@ -599,7 +629,116 @@ class MainWindow:
             job.selected_channel_by_track[stream_index] = int(label.rsplit(" ", 1)[-1]) - 1
         else:
             job.selected_channel_by_track.pop(stream_index, None)
+        # A preview of this track is now playing the wrong channel - stop it
+        # rather than trying to hot-swap the audio mid-play.
+        if self._playing == (job.id, stream_index):
+            self._stop_playback()
         self._redraw_track(job, stream_index)
+
+    # -- track preview playback -----------------------------------------------
+
+    def _on_track_play(self, job: Job, stream: AudioStream) -> None:
+        # Click on the track that's already playing = stop it.
+        if self._playing == (job.id, stream.index):
+            self._stop_playback()
+            return
+        # Otherwise stop whatever else was playing and start this one.
+        self._stop_playback()
+        if not TrackPlayer.available():
+            return
+        self._playing = (job.id, stream.index)
+        # Show "busy" while the track is extracted; disable so a double-click
+        # can't kick off a second extraction of the same track.
+        self._set_play_button(job.id, stream.index, ICON_BUSY, enabled=False)
+
+        channel_index = (job.selected_channel_by_track or {}).get(stream.index)
+
+        def extract() -> None:
+            try:
+                path = self._preview_file(job, stream, channel_index)
+            except Exception:
+                path = None
+            self.root.after(0, lambda: self._begin_afplay(job, stream, channel_index, path))
+
+        threading.Thread(target=extract, daemon=True).start()
+
+    def _begin_afplay(
+        self, job: Job, stream: AudioStream, channel_index: int | None, path: Path | None
+    ) -> None:
+        # The user may have stopped (or started another track) while this one
+        # was still extracting - if so, don't start playing.
+        if self._playing != (job.id, stream.index):
+            return
+        if path is None:
+            self._playing = None
+            self._set_play_button(job.id, stream.index, ICON_START, enabled=True)
+            return
+        self._player.play(
+            path,
+            on_finish=lambda: self.root.after(
+                0, lambda: self._on_playback_finished(job.id, stream.index)
+            ),
+        )
+        self._set_play_button(job.id, stream.index, ICON_STOP, enabled=True)
+
+    def _on_playback_finished(self, job_id: int, stream_index: int) -> None:
+        if self._playing != (job_id, stream_index):
+            return  # already superseded/stopped
+        self._playing = None
+        self._set_play_button(job_id, stream_index, ICON_START, enabled=True)
+
+    def _stop_playback(self) -> None:
+        if self._playing is None:
+            return
+        job_id, stream_index = self._playing
+        self._playing = None
+        self._player.stop()
+        self._set_play_button(job_id, stream_index, ICON_START, enabled=True)
+
+    def _set_play_button(self, job_id: int, stream_index: int, icon: str, enabled: bool) -> None:
+        row = self.rows.get(job_id)
+        if row is None:
+            return
+        button = row.track_play_buttons.get(stream_index)
+        if button is None:
+            return
+        try:
+            if not button.winfo_exists():
+                return
+            job = self.jobs.get(job_id)
+            ready = job is not None and job.status == "ready"
+            button.configure(text=icon, state="normal" if (enabled and ready) else "disabled")
+        except tk.TclError:
+            pass
+
+    def _preview_file(self, job: Job, stream: AudioStream, channel_index: int | None) -> Path:
+        """Extract (once, then cache) the exact audio a track's preview should
+        play - the chosen single channel if the user pinned one, otherwise the
+        full-stream downmix, matching what the worker would transcribe."""
+        key = (job.id, stream.index, channel_index)
+        cached = self._preview_files.get(key)
+        if cached is not None and cached.exists():
+            return cached
+        if self._preview_dir is None:
+            self._preview_dir = Path(tempfile.mkdtemp(prefix="local-transcriber-preview-"))
+        suffix = f"j{job.id}-s{stream.index}" + (f"-c{channel_index}" if channel_index is not None else "")
+        output_path = self._preview_dir / f"{suffix}.mp3"
+        if channel_index is not None:
+            extract_channel_to_mp3(job.source_path, stream.index, channel_index, output_path)
+        else:
+            extract_track_to_mp3(job.source_path, stream.index, output_path)
+        self._preview_files[key] = output_path
+        return output_path
+
+    def shutdown(self) -> None:
+        """Stop any preview and remove the temp files it extracted - called
+        when the window closes."""
+        self._player.stop()
+        self._playing = None
+        if self._preview_dir is not None:
+            shutil.rmtree(self._preview_dir, ignore_errors=True)
+            self._preview_dir = None
+            self._preview_files.clear()
 
     def _representative_envelope(self, job: Job, stream: AudioStream) -> list[float] | None:
         """The single series drawn for a track's waveform: the one channel
@@ -893,6 +1032,18 @@ class MainWindow:
             checkbutton.configure(state="normal" if job.status == "ready" else "disabled")
         for channel_combo in row.channel_combos.values():
             channel_combo.configure(state="readonly" if job.status == "ready" else "disabled")
+        # Previewing shares the same source file/CPU as transcription, so a
+        # job leaving "ready" (Start clicked) stops any preview of it and
+        # greys its play buttons - re-enabled once it's back to "ready".
+        if job.status != "ready" and self._playing is not None and self._playing[0] == job.id:
+            self._stop_playback()
+        play_enabled = job.status == "ready" and TrackPlayer.available()
+        for stream_index, play_button in row.track_play_buttons.items():
+            is_playing = self._playing == (job.id, stream_index)
+            play_button.configure(
+                text=ICON_STOP if is_playing else ICON_START,
+                state="normal" if play_enabled else "disabled",
+            )
 
         if job.status == "transcribing" and job.estimated_seconds:
             fraction = min(0.99, (elapsed or 0.0) / job.estimated_seconds)

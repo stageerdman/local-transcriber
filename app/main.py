@@ -27,9 +27,10 @@ def main() -> int:
     worker.start()
 
     root = _TK_ROOT_CLS()
-    MainWindow(root, job_queue, event_queue, db_conn)
+    window = MainWindow(root, job_queue, event_queue, db_conn)
 
     def on_close() -> None:
+        window.shutdown()
         job_queue.put(SENTINEL)
         root.destroy()
 
