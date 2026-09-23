@@ -240,6 +240,37 @@ it right."
 - If two tracks are contained in *each other* symmetrically at ~unity (s1≈s2)
   ⇒ duplicates: keep one.
 
+## End-to-end test on real audio (2026-09-23) → better architecture found
+Built `src/track_separation.py` (classify + isolate + gate + render) and ran it
+end-to-end on the real call. Results:
+- **Classification: perfect** on the full 25 min — keep(s3=remote), isolate(s1 −
+  s3 = local), drop(s2 duplicate). 2 speakers out.
+- **Isolation math: works** — the residual transcript contains the host's own
+  questions (absent from s3), i.e. the two speakers ARE separated.
+- **BUT transcribing the subtraction *residual* is low quality:** Whisper
+  **degenerate-loops / hallucinates** ("...top of the hill ×9", "Závodný výstav
+  ×20") on the rough, quiet residual, and auto-detects the wrong language.
+  Forcing language + `condition_on_previous_text=False` + normalization helped
+  but did NOT eliminate the looping. ASR on a subtracted residual is just poor
+  audio.
+
+**Key realization — don't transcribe the residual; transcribe only clean audio:**
+- The **mix track s1 is good-quality audio** (the real recording), not a residual.
+- During the **client's silent windows, s1 ≈ the host alone, clean.** (We already
+  compute per-window activity for both tracks.)
+- So: **client** = transcribe s3 (clean); **host** = transcribe s1, but only in
+  windows where s3 (client) is inactive — there s1 is clean host audio. The
+  acoustic subtraction's real job is **VAD/attribution** (who's active when), not
+  producing audio to feed Whisper.
+- Overlap (both talking) is the minority in turn-taking calls; handle as a
+  fallback (attribute to the louder-in-residual speaker, or mark overlapping).
+
+This reframes Phase 2/3: use subtraction + per-track VAD to build a **speaker
+activity timeline**, then transcribe each speaker from the **cleanest available
+source** for their active regions, and merge by timestamp. Avoids residual-ASR
+entirely for the common case. The `isolate()`/`noise_gate()` code stays useful
+for the VAD signal and for genuine-overlap fallback.
+
 ## Open questions / risks
 - **Detection reliability is the whole feature's gate** (Phase 0). If we can't
   detect direction + confidence robustly, safe-by-default is impossible → stop.
