@@ -91,6 +91,42 @@ One open wording call (Phase 4): toggle label **"Remove mic bleed between
 tracks"** vs an even-plainer phrasing. Default to the former + subtext; worth a
 quick gut-check, doesn't block engineering.
 
+## ▶ RESUME HERE (paused 2026-09-23)
+
+**State:** the manual-control feature is BUILT, tested (63 pass), and the app
+launches clean. All of the user's explicit asks work end-to-end (show tracks,
+include/exclude, name→label, per-track language, per-track RNNoise filter,
+subtract one track from another). Working tree clean; everything committed &
+pushed.
+
+**Pending user request (last message, truncated):** "Improve UI, let's drop
+the …" — the user wants **UI improvements** and to **drop something** (the
+sentence was cut off). **First action next session: ask the user what to drop
+and which UI improvements they want** before changing the panel.
+
+**Known-open polish (designed by the UX pros, not yet built):**
+- A/B **"Cleaned · original"** preview button so the user can *hear* a subtraction
+  result before transcribing (cheap: `render_transcription_wav` → temp wav →
+  existing `TrackPlayer`).
+- One-time **"two people in one track?"** discovery hint on the panel.
+- **Recent-names** suggestion list in the name entry (from `history_db`).
+- **Reset** button (revert per-track names/language/noise/subtraction for a job).
+- Ensure per-track drawer controls disable while a job transcribes (render uses
+  `job.status == "ready"`, but the panel isn't force re-rendered on status
+  change — verify/attach).
+
+**Not yet verified:** a full real transcription through the new pipeline in the
+actual app (each piece is unit-tested; a real 25-min call end-to-end hasn't been
+run). Suggested test: Miroslav call → name track 3 "Miroslav", track 1 "Me", on
+"Me" set Remove voice → Miroslav, uncheck the duplicate, transcribe; expect a
+clean 2-speaker transcript.
+
+**Key files:** engine `src/track_separation.py`; backend `app/worker.py`
+(`_transcribe_multi_track`) + `app/jobs.py` (Job per-track fields); UI
+`app/ui.py` (`_render_tracks_section`, `_build_track_detail`, and the
+`_on_track_*` / `_track_*` helpers). Spikes/analysis in this folder's `spike/`.
+RNNoise model: `scripts/fetch_rnnoise_model.sh` (gitignored weights).
+
 ## Phased roadmap
 
 ### Phase 0 — Detection spike (isolated, in this folder) — GATE ✅ GO
