@@ -11,7 +11,7 @@ from pathlib import Path
 from tkinter import ttk
 
 from app.jobs import Job, WorkerEvent
-from src import history_db
+from src import history_db, track_separation
 from src.audio_tracks import (
     AudioStream,
     compute_volume_envelope,
@@ -19,7 +19,17 @@ from src.audio_tracks import (
     safe_probe_audio_streams,
     track_speaker_names,
 )
-from src.catalog import DEFAULT_LANGUAGE, DEFAULT_MODEL, LANGUAGE_CHOICES, MODEL_CHOICES
+from src.catalog import (
+    DEFAULT_LANGUAGE,
+    DEFAULT_MODEL,
+    DEFAULT_POLISH_ENABLED,
+    LANGUAGE_CHOICES,
+    MODEL_CHOICES,
+    POLISH_BASE_SECONDS,
+    POLISH_SHARE_MAX,
+    POLISH_SHARE_MIN,
+    estimate_polish_seconds,
+)
 from src.converter import check_ffmpeg_installed
 from src.duration import probe_duration_seconds
 from src.file_pickers import pick_files, pick_folder
@@ -48,7 +58,7 @@ LANGUAGE_VALUE_TO_LABEL = {value: label for label, value in LANGUAGE_CHOICES}
 
 HISTORY_COLUMNS = ("date", "file", "model", "language", "duration", "elapsed", "status")
 
-ACTIVE_STATUSES = ("converting", "loading model", "transcribing")
+ACTIVE_STATUSES = ("converting", "loading model", "transcribing", "polishing")
 CANCELABLE_STATUSES = ("queued",) + ACTIVE_STATUSES
 TERMINAL_STATUSES = ("done", "error", "stopped")
 TICK_MS = 400
@@ -57,6 +67,10 @@ ICON_START = "▶"
 ICON_STOP = "■"
 ICON_RESET = "↻"
 ICON_BUSY = "…"
+
+# Amber used only for the shared-voice warning (banner + per-track marker);
+# distinct from the gray status text and meets contrast on the panel.
+WARN_FG = "#8a6500"
 
 # Waveform / seek-bar colors (readable in both light and dark themes).
 WAVEFORM_UNPLAYED = "#9aa0a6"
@@ -126,6 +140,7 @@ class RowWidgets:
     model_combo: ttk.Combobox
     language_var: tk.StringVar
     language_combo: ttk.Combobox
+    polish_var: tk.BooleanVar
     tracks_container: ttk.Frame
     track_checkbuttons: list[ttk.Checkbutton] = field(default_factory=list)
     channel_combos: dict[int, ttk.Combobox] = field(default_factory=dict)
@@ -140,6 +155,10 @@ class RowWidgets:
     track_status_labels: dict[int, ttk.Label] = field(default_factory=dict)
     track_detail_frames: dict[int, ttk.Frame] = field(default_factory=dict)
     tracks_header: "ttk.Label | None" = None
+    # Persistent holder for the shared-voice warning banner, so it can be
+    # re-rendered in place (on selection/subtraction changes) without a full
+    # section rebuild.
+    shared_voice_holder: "ttk.Frame | None" = None
 
 
 class MainWindow:
@@ -170,6 +189,8 @@ class MainWindow:
         # (job.id, AudioStream.index) pairs whose per-track detail drawer is
         # open in the panel.
         self._track_details_open: set[tuple[int, int]] = set()
+        # Pre-fix snapshot per job id, so a one-click shared-voice fix is undoable.
+        self._shared_voice_undo: dict[int, tuple] = {}
         # Playhead per track as a fraction [0, 1] of its duration. Persists
         # after stop so ▶ resumes where it left off; reset to 0 when another
         # track takes over.
@@ -388,6 +409,13 @@ class MainWindow:
     def _default_language(self) -> str | None:
         return self.settings.get("language", DEFAULT_LANGUAGE)
 
+    def _default_polish(self) -> bool:
+        return self.settings.get("polish", DEFAULT_POLISH_ENABLED)
+
+    def _persist_polish_selection(self, enabled: bool) -> None:
+        self.settings["polish"] = enabled
+        _save_settings(self.settings)
+
     def _persist_language_selection(self, language_value: str | None) -> None:
         self.settings["language"] = language_value
         _save_settings(self.settings)
@@ -411,7 +439,12 @@ class MainWindow:
             self._add_job(path)
 
     def _add_job(self, path: Path) -> None:
-        job = Job(source_path=path, model=self._default_model(), language=self._default_language())
+        job = Job(
+            source_path=path,
+            model=self._default_model(),
+            language=self._default_language(),
+            polish=self._default_polish(),
+        )
         self.jobs[job.id] = job
         self._create_row(job)
         self._probe_estimate_async(job)
@@ -447,9 +480,8 @@ class MainWindow:
 
         ttk.Separator(self.rows_frame, orient="horizontal").pack(fill="x")
 
-        expand_frame, model_var, model_combo, language_var, language_combo, tracks_container = (
-            self._build_expand_panel(job)
-        )
+        (expand_frame, model_var, model_combo, language_var, language_combo,
+         polish_var, tracks_container) = self._build_expand_panel(job)
 
         self.rows[job.id] = RowWidgets(
             frame=row_frame,
@@ -463,6 +495,7 @@ class MainWindow:
             model_combo=model_combo,
             language_var=language_var,
             language_combo=language_combo,
+            polish_var=polish_var,
             tracks_container=tracks_container,
         )
         self._bind_mousewheel(row_frame)
@@ -475,7 +508,8 @@ class MainWindow:
     # survives collapsing the row.
     def _build_expand_panel(
         self, job: Job
-    ) -> tuple[ttk.Frame, tk.StringVar, ttk.Combobox, tk.StringVar, ttk.Combobox, ttk.Frame]:
+    ) -> tuple[ttk.Frame, tk.StringVar, ttk.Combobox, tk.StringVar, ttk.Combobox,
+               tk.BooleanVar, ttk.Frame]:
         expand_frame = ttk.Frame(self.rows_frame, padding=(24, 4, 10, 10))
 
         settings_row = ttk.Frame(expand_frame)
@@ -505,6 +539,15 @@ class MainWindow:
         language_combo.pack(side="left")
         language_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_row_language_changed(job.id))
 
+        polish_var = tk.BooleanVar(value=job.polish)
+        polish_check = ttk.Checkbutton(
+            settings_row,
+            text="Polish (LLM cleanup)",
+            variable=polish_var,
+            command=lambda: self._on_row_polish_changed(job.id),
+        )
+        polish_check.pack(side="left", padx=(16, 0))
+
         ttk.Label(expand_frame, text="Audio tracks", font=("", 9, "bold")).pack(anchor="w")
         tracks_container = ttk.Frame(expand_frame)
         tracks_container.pack(fill="x", pady=(4, 0))
@@ -513,7 +556,8 @@ class MainWindow:
         for child in (settings_row, tracks_container):
             self._bind_mousewheel(child)
 
-        return expand_frame, model_var, model_combo, language_var, language_combo, tracks_container
+        return (expand_frame, model_var, model_combo, language_var, language_combo,
+                polish_var, tracks_container)
 
     # -- expand / collapse ---------------------------------------------------
 
@@ -569,6 +613,7 @@ class MainWindow:
         row.track_status_labels = {}
         row.track_detail_frames = {}
         row.tracks_header = None
+        row.shared_voice_holder = None
 
         tracks = job.tracks
         if tracks is None:
@@ -592,6 +637,10 @@ class MainWindow:
             header.pack(anchor="w", pady=(0, 3))
             row.tracks_header = header
             self._update_tracks_header(job)
+            holder = ttk.Frame(row.tracks_container)
+            holder.pack(fill="x")
+            row.shared_voice_holder = holder
+            self._render_shared_voice_banner(job)
 
         for stream in tracks:
             track_row = ttk.Frame(row.tracks_container)
@@ -827,6 +876,7 @@ class MainWindow:
             if ref is not None:
                 job.track_subtractions[stream.index] = [ref.index]
         self._update_track_status(job, stream)
+        self._refresh_shared_voice(job)
 
     def _track_status_summary(self, job: Job, stream: AudioStream) -> str:
         parts: list[str] = []
@@ -845,13 +895,28 @@ class MainWindow:
             parts.append(f"~{self._track_name_by_index(job, dup)}")
         return " · ".join(parts)
 
+    def _shared_voice_partner_name(self, job: Job, stream: AudioStream) -> str | None:
+        """If this track still shares a voice with another selected track, the
+        other track's name (for the ⚠ marker); else None."""
+        for w in self._unhandled_shared_voice(job):
+            if stream.index == w.mix_index:
+                return self._track_name_by_index(job, w.component_index)
+            if stream.index == w.component_index:
+                return self._track_name_by_index(job, w.mix_index)
+        return None
+
     def _update_track_status(self, job: Job, stream: AudioStream) -> None:
         row = self.rows.get(job.id)
         if row is None:
             return
         label = row.track_status_labels.get(stream.index)
-        if label is not None:
-            label.configure(text=self._track_status_summary(job, stream))
+        if label is None:
+            return
+        partner = self._shared_voice_partner_name(job, stream)
+        if partner is not None:
+            label.configure(text=f"⚠ same voice as {partner}", foreground=WARN_FG)
+        else:
+            label.configure(text=self._track_status_summary(job, stream), foreground="#868e96")
 
     def _update_tracks_header(self, job: Job) -> None:
         row = self.rows.get(job.id)
@@ -1162,6 +1227,184 @@ class MainWindow:
 
         self._recompute_estimate(job)
         self._render_tracks_section(job)
+        # Once tracks are known, check (in the background) whether any carry the
+        # same voice - the mic-bleed "doubling" safety net.
+        if len(job.tracks) > 1 and not job.shared_voice_analyzed:
+            self._analyze_shared_voice_async(job)
+
+    # --- shared-voice safety net ---------------------------------------------
+    # Representative window to analyze: tracks share a voice structurally, so a
+    # mid-call segment with both speakers active is enough (and cheap vs.
+    # decoding whole 90-minute tracks).
+    _SHARED_VOICE_SEGMENT_S = 90.0
+
+    def _compute_shared_voice(self, source: Path, tracks: list, duration: float | None) -> list:
+        """Decode a representative segment of each track and detect shared voices.
+        Pure of UI state so it runs identically from the async panel analysis and
+        the synchronous Start-time check. Returns [] on any failure."""
+        try:
+            seg = self._SHARED_VOICE_SEGMENT_S
+            start = max(0.0, (duration * 0.35) if duration else 0.0)
+            if duration and start + seg > duration:
+                start = max(0.0, duration - seg)
+            signals = []
+            for stream in tracks:
+                pcm = track_separation.decode_track_pcm(
+                    source, stream.index, start_s=start, duration_s=seg
+                )
+                signals.append(track_separation.TrackSignal(
+                    index=stream.index, name="", samples=pcm
+                ))
+            return track_separation.detect_shared_voice(signals)
+        except Exception:
+            return []
+
+    def _analyze_shared_voice_async(self, job: Job) -> None:
+        job.shared_voice_analyzed = True  # guard: run once per job
+        tracks = list(job.tracks or [])
+        duration = job.audio_duration_seconds
+        source = job.source_path
+
+        def analyze() -> None:
+            warnings = self._compute_shared_voice(source, tracks, duration)
+            self.root.after(0, lambda: self._on_shared_voice_analyzed(job, warnings))
+
+        threading.Thread(target=analyze, daemon=True).start()
+
+    def _on_shared_voice_analyzed(self, job: Job, warnings: list) -> None:
+        job.shared_voice_warnings = warnings
+        self._render_tracks_section(job)
+
+    def _unhandled_shared_voice(self, job: Job):
+        """Shared-voice warnings that still apply given the current selection and
+        subtractions - i.e. would still double a speaker if transcribed now."""
+        if not job.shared_voice_warnings or job.shared_voice_dismissed:
+            return []
+        selected = job.selected_track_indices
+        if selected is None:
+            selected = {s.index for s in (job.tracks or [])}
+        subs = job.track_subtractions or {}
+        unhandled = []
+        for w in job.shared_voice_warnings:
+            if w.mix_index not in selected or w.component_index not in selected:
+                continue  # one side not being transcribed -> no doubling
+            if w.kind == "contains" and w.component_index in subs.get(w.mix_index, []):
+                continue  # already isolating the mix minus the component
+            unhandled.append(w)
+        return unhandled
+
+    def _shared_voice_fix_plan(self, job: Job):
+        """(subtractions, drop) the one-click fix would apply, given selection."""
+        selected = sorted(
+            job.selected_track_indices
+            if job.selected_track_indices is not None
+            else {s.index for s in (job.tracks or [])}
+        )
+        return track_separation.resolve_shared_voice(selected, job.shared_voice_warnings or [])
+
+    def _shared_voice_plan_text(self, job: Job) -> str:
+        """Plain-language description of what the fix will do, by speaker name."""
+        subs, drop = self._shared_voice_fix_plan(job)
+        clauses: list[str] = []
+        kept_components = {c for refs in subs.values() for c in refs}
+        for comp in sorted(kept_components):
+            clauses.append(f'keep "{self._track_name_by_index(job, comp)}" as its own speaker')
+        for mix, refs in subs.items():
+            names = ", ".join(self._track_name_by_index(job, r) for r in refs)
+            clauses.append(f'remove {names} from "{self._track_name_by_index(job, mix)}"')
+        if drop:
+            names = ", ".join(self._track_name_by_index(job, d) for d in sorted(drop))
+            clauses.append(f"skip {names}")
+        return "Fix: " + ", ".join(clauses) + "." if clauses else ""
+
+    def _refresh_shared_voice(self, job: Job) -> None:
+        """Cheap re-evaluation (no detector re-run) after the user changes the
+        selection or a subtraction: rebuild the banner and refresh the markers."""
+        self._render_shared_voice_banner(job)
+        for stream in (job.tracks or []):
+            self._update_track_status(job, stream)
+
+    def _render_shared_voice_banner(self, job: Job) -> None:
+        row = self.rows.get(job.id)
+        if row is None or row.shared_voice_holder is None:
+            return
+        container = row.shared_voice_holder
+        for child in container.winfo_children():
+            child.destroy()
+        unhandled = self._unhandled_shared_voice(job)
+        if not unhandled:
+            if job.shared_voice_fixed:
+                frame = ttk.Frame(container)
+                frame.pack(fill="x", pady=(0, 4))
+                ttk.Label(
+                    frame, text="✓ Fixed — the same voice won't be written twice.",
+                    foreground="#2b8a3e",
+                ).pack(side="left")
+                if self._shared_voice_undo.get(job.id) is not None:
+                    ttk.Button(frame, text="Undo", width=6,
+                               command=lambda: self._undo_shared_voice_fix(job)).pack(side="left", padx=(8, 0))
+            return
+
+        # Name the shared voice(s) = the clean component tracks in the warnings.
+        names = sorted({self._track_name_by_index(job, w.component_index) for w in unhandled})
+        who = " and ".join(f'"{n}"' for n in names)
+        frame = ttk.Frame(container)
+        frame.pack(fill="x", pady=(0, 5))
+        ttk.Label(
+            frame,
+            text=f"⚠ The same voice is on two tracks — {who} would be written twice.",
+            foreground=WARN_FG, font=("", 11, "bold"), wraplength=460, justify="left",
+        ).pack(anchor="w")
+        plan = self._shared_voice_plan_text(job)
+        if plan:
+            ttk.Label(frame, text=plan, foreground="#555", wraplength=460, justify="left").pack(
+                anchor="w", pady=(1, 3)
+            )
+        buttons = ttk.Frame(frame)
+        buttons.pack(anchor="w")
+        editable = job.status == "ready"
+        fix_btn = ttk.Button(buttons, text="Fix automatically",
+                             command=lambda: self._apply_shared_voice_fix(job))
+        fix_btn.configure(state="normal" if editable else "disabled")
+        fix_btn.pack(side="left")
+        ttk.Button(buttons, text="Keep as is",
+                   command=lambda: self._dismiss_shared_voice(job)).pack(side="left", padx=(6, 0))
+
+    def _apply_shared_voice_fix(self, job: Job) -> None:
+        """One-click fix: apply the suggested subtractions and drop redundant
+        tracks, then re-render. Snapshotted so it's one-click reversible, and
+        also adjustable via the per-track controls it leaves in place."""
+        if job.selected_track_indices is None:
+            job.selected_track_indices = {s.index for s in (job.tracks or [])}
+        # Snapshot for Undo (before mutating).
+        self._shared_voice_undo[job.id] = (
+            set(job.selected_track_indices),
+            {k: list(v) for k, v in (job.track_subtractions or {}).items()},
+        )
+        subs, drop = self._shared_voice_fix_plan(job)
+        if job.track_subtractions is None:
+            job.track_subtractions = {}
+        for mix, refs in subs.items():
+            existing = set(job.track_subtractions.get(mix, []))
+            job.track_subtractions[mix] = sorted(existing | set(refs))
+        job.selected_track_indices -= drop
+        job.shared_voice_fixed = True
+        self._recompute_estimate(job)
+        self._render_tracks_section(job)
+
+    def _undo_shared_voice_fix(self, job: Job) -> None:
+        snap = self._shared_voice_undo.pop(job.id, None)
+        if snap is not None:
+            selected, subtractions = snap
+            job.selected_track_indices = set(selected)
+            job.track_subtractions = {k: list(v) for k, v in subtractions.items()}
+        job.shared_voice_fixed = False
+        self._recompute_estimate(job)
+        self._render_tracks_section(job)
+
+    def _dismiss_shared_voice(self, job: Job) -> None:
+        job.shared_voice_dismissed = True
+        self._render_tracks_section(job)
 
     def _draw_envelope(self, canvas: tk.Canvas) -> None:
         envelope = getattr(canvas, "_envelope", None)
@@ -1232,6 +1475,7 @@ class MainWindow:
             job.selected_track_indices.discard(stream_index)
         self._update_tracks_header(job)
         self._recompute_estimate(job)
+        self._refresh_shared_voice(job)
 
     # -- pre-start time estimate ----------------------------------------------
 
@@ -1263,6 +1507,9 @@ class MainWindow:
             selected_count = len(job.selected_track_indices or job.tracks)
             estimate *= max(1, selected_count)
         job.estimated_seconds = estimate
+        job.estimated_polish_seconds = estimate_polish_seconds(
+            job.audio_duration_seconds, job.polish
+        )
         self._refresh_row(job)
 
     def _on_row_model_changed(self, job_id: int) -> None:
@@ -1283,6 +1530,14 @@ class MainWindow:
         self._persist_language_selection(job.language)
         self._recompute_estimate(job)
 
+    def _on_row_polish_changed(self, job_id: int) -> None:
+        job = self.jobs.get(job_id)
+        row = self.rows.get(job_id)
+        if job is None or row is None:
+            return
+        job.polish = bool(row.polish_var.get())
+        self._persist_polish_selection(job.polish)
+
     # -- start / stop / reset -------------------------------------------------
 
     def _on_action_clicked(self, job_id: int) -> None:
@@ -1297,9 +1552,70 @@ class MainWindow:
             self._reset_job(job)
 
     def _start_job(self, job: Job) -> None:
+        # The shared-voice check needs the tracks analyzed. If the user never
+        # opened the track panel, do it now (in the background) and resume Start
+        # when it's ready - so the safety net fires even without expanding.
+        if job.shared_voice_warnings is None and (job.tracks is None or len(job.tracks) > 1):
+            self._analyze_then_start(job)
+            return
+        # Backstop: if two selected tracks still carry the same voice, make the
+        # user actively choose before shipping a doubled transcript.
+        unhandled = self._unhandled_shared_voice(job)
+        if unhandled and not self._confirm_shared_voice_start(job, unhandled):
+            return
         job.status = "queued"
         self._refresh_row(job)
         self.job_queue.put(job)
+
+    def _analyze_then_start(self, job: Job) -> None:
+        """Probe tracks (if needed) + run shared-voice detection, then re-enter
+        Start. Keeps the UI responsive with a brief 'checking tracks' status."""
+        job.status_detail = "checking tracks…"
+        self._refresh_row(job)
+        source = job.source_path
+        known = list(job.tracks) if job.tracks is not None else None
+        duration = job.audio_duration_seconds
+
+        def work() -> None:
+            streams = known if known is not None else safe_probe_audio_streams(source)
+            warnings = (
+                self._compute_shared_voice(source, streams, duration)
+                if len(streams) > 1 else []
+            )
+            self.root.after(0, lambda: finish(streams, warnings))
+
+        def finish(streams, warnings) -> None:
+            if job.tracks is None:
+                job.tracks = streams
+            if job.selected_track_indices is None:
+                job.selected_track_indices = {s.index for s in streams}
+            job.shared_voice_warnings = warnings
+            job.shared_voice_analyzed = True
+            job.status_detail = None
+            self._start_job(job)  # re-enter: now analyzed -> guard can fire
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _confirm_shared_voice_start(self, job: Job, unhandled: list) -> bool:
+        """Soft-block at Start. Returns True if the job should proceed."""
+        from tkinter import messagebox
+
+        names = sorted({self._track_name_by_index(job, w.component_index) for w in unhandled})
+        who = " and ".join(f'"{n}"' for n in names)
+        answer = messagebox.askyesnocancel(
+            "Same voice on two tracks",
+            f"{who} is on two tracks and would be written twice in the transcript.\n\n"
+            "Fix this automatically before transcribing?\n\n"
+            "Yes — fix and start    ·    No — start anyway    ·    Cancel",
+            icon="warning",
+            parent=self.root,
+        )
+        if answer is None:  # Cancel
+            return False
+        if answer:  # Yes -> fix, then start
+            self._apply_shared_voice_fix(job)
+            return True
+        return True  # No -> start anyway
 
     def _stop_job(self, job: Job) -> None:
         job.stop_event.set()
@@ -1315,6 +1631,7 @@ class MainWindow:
         job.elapsed_seconds = None
         job.transcribe_fraction = None
         job.transcribe_position_fraction = None
+        job.polish_started_at = None
         job.output_path = None
         job.error = None
         self._refresh_row(job)
@@ -1362,6 +1679,17 @@ class MainWindow:
             return ICON_RESET, "normal"
         return ICON_BUSY, "disabled"
 
+    def _polish_share(self, job: Job) -> float:
+        """Fraction of the overall bar reserved for the polish tail, from the
+        transcribe/polish time estimates (clamped). 0 when polish is off."""
+        if not job.polish:
+            return 0.0
+        transcribe = job.estimated_seconds or 0.0
+        polish = job.estimated_polish_seconds or 0.0
+        if transcribe + polish <= 0:
+            return 0.0
+        return max(POLISH_SHARE_MIN, min(POLISH_SHARE_MAX, polish / (transcribe + polish)))
+
     def _progress_view(self, job: Job, elapsed: float) -> dict:
         """Unify the two progress sources so the row and the top panel agree.
 
@@ -1371,25 +1699,42 @@ class MainWindow:
         throughput. Otherwise we fall back to the duration-based time estimate
         - and deliberately show NO timecode there, so a timecode on screen
         always means a true position, never a guess.
+
+        Transcription fills only `[0, 1 - polish_share]` so the polish pass has
+        room for its own moving tail, and the ETA folds in the polish estimate
+        so "~X left" accounts for the whole job, not just transcription.
         """
         duration = job.audio_duration_seconds
+        share = self._polish_share(job)
+        polish_eta = job.estimated_polish_seconds or 0.0  # whole pass still ahead
         if job.transcribe_fraction is not None:
-            fraction = min(0.999, max(0.0, job.transcribe_fraction))
+            raw = min(0.999, max(0.0, job.transcribe_fraction))
+            fraction = raw * (1 - share)
             timecode = None
             if duration and job.transcribe_position_fraction is not None:
                 position = max(0.0, min(1.0, job.transcribe_position_fraction)) * duration
                 timecode = f"{format_timecode(position)} / {format_timecode(duration)}"
-            eta = (elapsed / fraction - elapsed) if (fraction > 0 and elapsed) else None
+            transcribe_eta = (elapsed / raw - elapsed) if (raw > 0 and elapsed) else None
+            eta = transcribe_eta + polish_eta if transcribe_eta is not None else None
             return {"fraction": fraction, "real": True, "timecode": timecode, "eta": eta}
         if job.estimated_seconds:
-            fraction = min(0.99, (elapsed or 0.0) / job.estimated_seconds)
-            return {
-                "fraction": fraction,
-                "real": False,
-                "timecode": None,
-                "eta": max(0.0, job.estimated_seconds - (elapsed or 0.0)),
-            }
+            fraction = min(0.99, (elapsed or 0.0) / job.estimated_seconds) * (1 - share)
+            eta = max(0.0, job.estimated_seconds - (elapsed or 0.0)) + polish_eta
+            return {"fraction": fraction, "real": False, "timecode": None, "eta": eta}
         return {"fraction": None, "real": False, "timecode": None, "eta": None}
+
+    def _polish_view(self, job: Job) -> dict:
+        """Progress for the polish phase: a time-animated tail of the same bar,
+        picking up where transcription left off so it never resets to 0."""
+        share = self._polish_share(job) or POLISH_SHARE_MIN
+        est = job.estimated_polish_seconds or POLISH_BASE_SECONDS
+        elapsed = (
+            (datetime.now() - job.polish_started_at).total_seconds()
+            if job.polish_started_at
+            else 0.0
+        )
+        progress = min(0.99, elapsed / est) if est > 0 else 0.99
+        return {"fraction": (1 - share) + share * progress, "eta": max(0.0, est - elapsed)}
 
     def _transcribe_detail_text(self, job: Job, view: dict) -> str:
         """Compact per-row label. Timecode is the hero when progress is real;
@@ -1456,6 +1801,15 @@ class MainWindow:
                 row.progress_bar.configure(mode="determinate")
                 row.progress_bar["value"] = view["fraction"] * 100
                 row.detail_label.configure(text=self._transcribe_detail_text(job, view))
+        elif job.status == "polishing":
+            view = self._polish_view(job)
+            row.progress_bar.stop()
+            row.progress_bar.configure(mode="determinate")
+            row.progress_bar["value"] = view["fraction"] * 100
+            eta = format_minutes_left(view["eta"])
+            row.detail_label.configure(
+                text=f"Polishing…  ·  ~{eta} left" if eta else "Polishing…"
+            )
         elif job.status == "loading model":
             row.progress_bar.configure(mode="indeterminate")
             row.progress_bar.start(15)
@@ -1475,7 +1829,8 @@ class MainWindow:
             row.progress_bar.configure(mode="determinate")
             row.progress_bar["value"] = 0
             if job.estimated_seconds:
-                row.detail_label.configure(text=f"~{format_seconds(job.estimated_seconds)} estimated")
+                total = job.estimated_seconds + (job.estimated_polish_seconds or 0.0)
+                row.detail_label.configure(text=f"~{format_seconds(total)} estimated")
             else:
                 row.detail_label.configure(text="estimating..." if job.audio_duration_seconds is None else "-")
         elif job.status == "queued":
@@ -1483,7 +1838,8 @@ class MainWindow:
             row.progress_bar.configure(mode="determinate")
             row.progress_bar["value"] = 0
             if job.estimated_seconds:
-                row.detail_label.configure(text=f"waiting... (~{format_seconds(job.estimated_seconds)})")
+                total = job.estimated_seconds + (job.estimated_polish_seconds or 0.0)
+                row.detail_label.configure(text=f"waiting... (~{format_seconds(total)})")
             else:
                 row.detail_label.configure(text="waiting...")
         else:
@@ -1543,6 +1899,18 @@ class MainWindow:
                 if eta:
                     detail += f"  •  about {eta} left"
                 self.progress_detail_var.set(detail)
+            return
+
+        if job.status == "polishing":
+            view = self._polish_view(job)
+            self.progress_bar.stop()
+            self.progress_bar.configure(mode="determinate")
+            self.progress_bar["value"] = view["fraction"] * 100
+            eta = format_minutes_left(view["eta"])
+            detail = "Cleaning up the transcript with Claude"
+            if eta:
+                detail += f"  •  about {eta} left"
+            self.progress_detail_var.set(detail)
             return
 
         self.progress_bar.stop()

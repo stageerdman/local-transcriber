@@ -21,12 +21,21 @@ class Job:
     source_path: Path
     model: str
     language: str | None
+    # LLM cleanup pass after transcription (see src.polish), via the Claude Code
+    # CLI. On by default; the raw transcript is always kept alongside it.
+    polish: bool = True
     id: int = field(default_factory=lambda: next(_id_counter))
     status: JobStatus = "ready"
     status_detail: str | None = None
     stop_event: threading.Event = field(default_factory=threading.Event)
     audio_duration_seconds: float | None = None
     estimated_seconds: float | None = None
+    # Estimated seconds for the polish pass (set when the job starts), and the
+    # moment polishing began - together they animate the polish tail of the same
+    # progress bar instead of leaving it frozen at 0. Both None when polish is
+    # off or hasn't started.
+    estimated_polish_seconds: float | None = None
+    polish_started_at: datetime | None = None
     # Real transcription progress in [0, 1] - how far through the audio the
     # engine has actually processed, reported per chunk (see engine/worker).
     # `None` until the first real update arrives (or when the backend can't
@@ -90,6 +99,19 @@ class Job:
     # Per-track voice subtraction: index -> list of other AudioStream.index
     # values whose voice should be removed from this track before transcribing.
     track_subtractions: dict[int, list[int]] | None = None
+
+    # --- shared-voice safety net (see src.track_separation.detect_shared_voice)
+    # Populated by an async PCM analysis after the tracks load: pairs of tracks
+    # that carry the same voice, so transcribing both would double that speaker.
+    # The UI filters these to the current selection/subtractions and warns.
+    # `None` = not analyzed yet; `[]` = analyzed, nothing shared.
+    shared_voice_warnings: list | None = None
+    shared_voice_analyzed: bool = False
+    # Set when the user explicitly dismisses the warning, so it stops nagging.
+    shared_voice_dismissed: bool = False
+    # Set right after a one-click auto-fix, so the banner can confirm it (with an
+    # Undo) instead of just vanishing.
+    shared_voice_fixed: bool = False
 
 
 @dataclass
