@@ -1,6 +1,7 @@
 # Local Transcriber
 
-A local Mac app for transcribing sales calls (and any other audio/video) entirely offline.
+A local Mac app for transcribing sales calls (and any other audio/video) on-device.
+Transcription runs fully offline; the optional LLM cleanup pass uses the `claude` CLI (see below).
 
 Open it from Finder/Spotlight, then either **drag and drop** a file/folder onto the window or use
 "Add File.../Add Folder..." — files are added to a resizable list, each with its own model picker
@@ -62,19 +63,43 @@ Every file in the list has its own model picker, so a batch can mix models freel
 starts and unlocks again after Reset. Language is chosen once in the toolbar and applies to files
 as they're added.
 
-| Label | Repo | Notes |
+| Label | Repo / id | Notes |
 |---|---|---|
-| Tiny | `mlx-community/whisper-tiny-mlx` | fastest, lowest accuracy |
-| Base | `mlx-community/whisper-base-mlx` | |
-| Small (default) | `mlx-community/whisper-small-mlx` | good balance for English |
-| Medium | `mlx-community/whisper-medium-mlx` | recommended for Czech and other non-English audio |
-| Large-v3 | `mlx-community/whisper-large-v3-mlx` | best accuracy, slowest |
-| Large-v3-turbo | `mlx-community/whisper-large-v3-turbo` | fast + accurate |
+| Czech — finetuned large-v3 (**default**) | `czech-large-v3-mlx` | best Czech quality; finetuned `mikr/whisper-large-v3-czech-cv13`, run with Silero VAD. Needs one-time setup (below). |
+| Parakeet TDT v3 | `mlx-community/parakeet-tdt-0.6b-v3` | fastest (20–100× realtime), never hallucinates; plainer Czech |
+| Whisper large-v3 | `mlx-community/whisper-large-v3-mlx` | multilingual |
+| Whisper large-v3-turbo | `mlx-community/whisper-large-v3-turbo` | fast + accurate |
+| Whisper medium / small / tiny | `mlx-community/whisper-*-mlx` | smaller/faster, lower accuracy |
 
-Language dropdown: Auto-detect, English, Czech, Slovak, German. The first transcription with a
+The Whisper-family models run through a **Silero VAD** pass (speech is chunked, silence skipped)
+with tuned decode settings (`condition_on_previous_text=False`, a short temperature ladder). This is
+what stops Whisper from hallucinating boilerplate ("Titulky vytvořil…") or looping on silent / mic-bleed
+‑subtracted tracks. Parakeet needs no VAD.
+
+**One-time setup for the Czech model:** it isn't on Hugging Face in MLX form, so convert it once:
+
+```bash
+python scripts/convert_czech_model.py   # ~3 GB download + ~3 GB converted output
+```
+
+Language dropdown: Czech (default), Auto-detect, English, Slovak, German. The first transcription with a
 model you haven't used before downloads/caches it locally via Hugging Face — that download time
 is one-off and not representative of normal transcription speed (see the note on estimates
 below).
+
+### LLM polishing (optional, on by default)
+
+Each file has a **Polish (LLM cleanup)** toggle. When on, the raw transcript is cleaned by Claude
+via the **`claude` CLI** (Claude Code) — it restores punctuation, casing, sentence/paragraph breaks
+and removes fillers **without adding or changing meaning**. A strict Czech "correct-only" prompt,
+a length tripwire, and an accent-folded word-containment check mean that if the model ever drifts or
+the CLI is unavailable, the pass falls back to the raw text — polish is a readability bonus, never a
+correctness risk. The raw transcript is always kept alongside as a `*.raw.md` sibling.
+
+This pass needs the [`claude` CLI](https://claude.com/claude-code) installed and authenticated, plus
+network access; the rest of the app stays offline. It replaces the earlier local Gemma/`mlx-lm`
+pass, which added minutes per job loading a ~6.7 GB model — one `claude` call now cleans a whole
+transcript in seconds.
 
 ## Output
 

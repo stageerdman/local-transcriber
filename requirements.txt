@@ -1,4 +1,7 @@
 mlx-whisper>=0.4.3
 parakeet-mlx>=0.5.2
+faster-whisper>=1.0.0   # used only for its bundled Silero VAD - src/transcription.py
+# Transcript polishing now shells out to the `claude` CLI (Claude Code), so no
+# local LLM dependency - see src/polish.py.
 pytest>=8.0.0
 tkinterdnd2>=0.4.2

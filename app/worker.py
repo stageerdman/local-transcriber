@@ -13,7 +13,7 @@ from typing import Callable
 
 from app.engine import run_engine
 from app.jobs import Job, WorkerEvent
-from src import dialogue, history_db, md_writer
+from src import catalog, dialogue, history_db, md_writer
 from src.audio_tracks import (
     AudioStream,
     safe_probe_audio_streams,
@@ -103,8 +103,28 @@ class TranscriptionWorker(threading.Thread):
         if language is SENTINEL:
             language = job.language
         self._ensure_engine_running()
-        self.request_queue.put((job.id, job.model, mp3_path, language))
+        self.request_queue.put(("transcribe", job.id, job.model, mp3_path, language, True))
+        return self._await_engine_result(job, on_progress)
 
+    def _polish_via_engine(self, job: Job, payload, is_blocks: bool):
+        """Run the LLM cleanup pass (Claude CLI) via the engine process.
+
+        `is_blocks=True`: `payload` is a list of per-speaker block texts, polished
+        in one batched call (structure preserved); returns a list. `False`:
+        `payload` is one plain-text passage, chunked internally; returns a str.
+
+        The polish bar is a time-animated tail of the same overall bar (the UI
+        drives it from `polish_started_at` + `estimated_polish_seconds`), so we
+        don't feed per-call fractions back here - that would clobber the
+        transcription-end bar value. We just mark when polishing started.
+        """
+        self._ensure_engine_running()
+        job.polish_started_at = datetime.now()
+        job.status_detail = None  # drop any "track N/M" detail from transcription
+        self.request_queue.put(("polish", job.id, payload, is_blocks))
+        return self._await_engine_result(job, on_progress=None)
+
+    def _await_engine_result(self, job: Job, on_progress):
         while True:
             if job.stop_event.is_set():
                 self._kill_engine()
@@ -152,6 +172,9 @@ class TranscriptionWorker(threading.Thread):
             job.estimated_seconds = history_db.estimate_seconds(
                 self.db_conn, job.model, job.language, job.audio_duration_seconds
             )
+            job.estimated_polish_seconds = catalog.estimate_polish_seconds(
+                job.audio_duration_seconds, job.polish
+            )
 
             if job.stop_event.is_set():
                 raise _StopRequested()
@@ -185,7 +208,16 @@ class TranscriptionWorker(threading.Thread):
                     job.estimated_seconds *= len(selected_streams)
                 labeled_segments = self._transcribe_multi_track(job, streams, selected_streams, temp_dir)
                 blocks = dialogue.merge_segments_into_blocks(labeled_segments)
-                transcript_text = dialogue.render_blocks_markdown(blocks)
+                raw_transcript_text = dialogue.render_blocks_markdown(blocks)
+                # Polish one turn at a time, then re-render so speaker labels and
+                # timestamps (added by render) are never exposed to the LLM.
+                if job.polish and blocks:
+                    polished = self._polish_via_engine(job, [b.text for b in blocks], is_blocks=True)
+                    for block, text in zip(blocks, polished):
+                        block.text = text
+                    transcript_text = dialogue.render_blocks_markdown(blocks)
+                else:
+                    transcript_text = raw_transcript_text
                 # A single selected track out of a multi-track container has
                 # nothing to diarize - `render_blocks_markdown` already
                 # collapses to plain text for one speaker, so keep the
@@ -215,10 +247,16 @@ class TranscriptionWorker(threading.Thread):
 
                 segments = self._transcribe_via_engine(job, mp3_path, on_progress)
                 text = " ".join(seg.text for seg in segments).strip()
-                transcript_text = text + ("\n" if text else "")
+                raw_transcript_text = text + ("\n" if text else "")
+                if job.polish and text:
+                    polished = self._polish_via_engine(job, text, is_blocks=False)
+                    transcript_text = polished.strip() + "\n"
+                else:
+                    transcript_text = raw_transcript_text
                 speakers_detected = None
                 diarization_method = None
 
+            polished_applied = job.polish and transcript_text != raw_transcript_text
             elapsed_seconds = time.monotonic() - start_monotonic
             md_path = md_writer.write_transcript_markdown(
                 job.source_path,
@@ -229,6 +267,8 @@ class TranscriptionWorker(threading.Thread):
                 transcribed_at=started_at,
                 speakers=speakers_detected,
                 diarization=diarization_method,
+                polished=polished_applied,
+                raw_transcript_text=raw_transcript_text if polished_applied else None,
             )
 
             job.elapsed_seconds = elapsed_seconds
