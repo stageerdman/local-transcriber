@@ -352,3 +352,85 @@ default ON** (user override of the pro's "off" recommendation).
   for v1.
 - Channel selection interacts with detection — detect on the same channel the
   user will transcribe (respect `selected_channel_by_track`).
+
+## 2026-10-02 — Real failure diagnosed: "Petr Sochůrek" doubled transcript
+A shipped transcript (`~/Downloads/Sales Call - Petr Sochůrek.md`) had both
+speakers **doubled** — the client's apology/medical monologue appeared under both
+`Klient` and `Obchodnik` at near-identical timestamps. Root-cause analysis on the
+real `.mov` (3 stereo streams, all dual-mono L==R, ~94 min):
+
+**True structure (confirmed by transcribing 45–70 s snippets per track with
+whisper-base):**
+- `s3` = **CLIENT**, clean (the remote/call audio). Coach only faintly bleeds in.
+- `s1` = **CLIENT + COACH** mix. `s1 − s3` at **g=1.000, 4.1 dB drop, residual
+  corr 0.00** cleanly isolates the **COACH** (verified: s1−s3 returns the coach's
+  intro verbatim; during client-only speech it drops to −30 dB = silence).
+- `s2` = a second redundant mix (corr 0.66 w/ s1; s3 is **not** a unity component
+  of s2, so `s2 − s3` does NOT clean it). Should be dropped.
+- **Correct plan: keep s3 (Client) · isolate s1−s3 (Coach) · drop s2.** Validated
+  end-to-end on a two-speaker window → doubling gone.
+
+**Why the shipped output doubled:** the transcribed tracks were two full mixes
+(both carry both voices) with no working subtraction → everything transcribed
+twice. Manual control didn't prevent it.
+
+**Algorithm bugs found in `classify_tracks` / gating:**
+1. **Window instability** — `classify_tracks` run on one window flips its verdict:
+   `early@30s` → s2=duplicate-of-s1, s1/s3=keep (doubles the client); `busy@5min`
+   → s1=isolate(3) but s2=keep (s2 mix doubles everything). Must classify over the
+   **whole recording**, not one arbitrary window.
+2. **Containment saturates** — in continuous two-party talk every track is
+   "active" ~99 % of the time, so active-window containment → ~1.0 everywhere and
+   the direction/asymmetry test (`_CONTAIN_HIGH`, `_FRAC_ASYM`) becomes
+   meaningless. The robust discriminator is the **unity-gain subtraction** signal
+   (g≈1 + large drop + decorrelated residual), which held regardless of activity.
+3. **Redundant-mix handling missing** — s1 and s2 are both mixes but NOT clean
+   duplicates (corr 0.66), so the duplicate test misses s2 and it gets `keep`,
+   re-emitting both speakers. Need "this track adds no new speaker → drop".
+4. **Gate too weak → hallucination** — `noise_gate` thresholds at 10 % of the
+   residual's OWN RMS, so a uniformly near-silent coach residual passes low-level
+   noise through and Whisper hallucinates ("CZEF", "M ploch", "všaká všaká"). A
+   **ratio gate** (zero windows where residual RMS < ~0.5× the mix RMS = the
+   subtracted speaker dominated) removed the real doubling; still needs a harder
+   absolute floor + VAD (real pipeline uses czech-large + Silero VAD) to kill the
+   last hallucinated filler.
+
+## 2026-10-02 — Fix shipped: doubling safety-net + mix-relative gate
+Scope (user-directed): keep manual control; add a pre-transcribe SAFETY NET that
+warns when two selected tracks carry the same voice (the cause of the doubling),
+plus fix the gating quality. Did NOT re-enable auto-classification.
+
+**New engine primitives (`src/track_separation.py`):**
+- `detect_shared_voice(signals) -> [SharedVoiceWarning]` — pure PCM analysis.
+  For each pair: shared voice if their active-window waveform correlation is
+  high (median ≥ 0.30) with a decorrelated full-segment residual. DIRECTION from
+  activity CONTAINMENT (robust to continuous talk, unlike the old `_FRAC_ASYM`):
+  the component's active windows sit inside the mix's (`P(mix|comp) ≥ 0.93`,
+  `P(comp|mix) < 0.93`) AND it subtracts out at ~unity gain → `contains`
+  (isolate mix−component, keep component); else `duplicate` (drop one). Windowed
+  + median-aggregated so a single sampled moment can't flip the verdict.
+- `gate_to_reference(residual, mix)` — replaces the own-RMS `noise_gate` in the
+  isolate render path. Keeps a window only if the residual retains a real
+  fraction of the MIX energy there (≥0.5) and clears an absolute floor, so the
+  stretches where the other (subtracted) speaker dominated become true silence
+  instead of low-level residue Whisper hallucinates on.
+
+**Multi-call validation (all 25 multi-track recordings in My Call Analysis):**
+- **22/25 → the correct clean 2-speaker plan** `isolate s1−s3 / keep s3 / drop s2`
+  (identical to the confirmed-correct Petr Sochůrek structure).
+- 2× 6-track (Marek, Expensive Roleplay) → clean 2-speaker.
+- **3 flagged, not silently wrong** (the safety-net working as intended):
+  - `Radoslav` — all three tracks are the SAME content (s1≡s3, s2 = ½-gain copy):
+    no per-track speaker separation exists in the recording → honestly collapses
+    to 1 track (prevents tripling). Correct.
+  - `Martin` (6-track) — complex OBS routing; detector correctly flags many
+    shared-voice pairs (warning is right), but the naive auto-resolve leaves two
+    isolates still sharing a voice → user adjusts manually. Auto-fix is
+    best-effort on complex files; the WARNING is reliable.
+- Clean separated pairs (s3 + isolated s1−s3) produce NO warning, so a
+  correctly-configured job is never nagged.
+
+**Key correction to the earlier diagnosis:** the subtraction itself was already
+optimal (global scalar == block-wise == short-FIR on real audio — same residual),
+so no adaptive filter was added. The doubling was wrong TRACK SELECTION (two
+mixes both transcribed), which the safety-net now catches.

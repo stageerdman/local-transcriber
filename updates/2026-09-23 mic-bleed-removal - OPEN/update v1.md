@@ -257,3 +257,46 @@ lagged-xcorr direction test is reused by the classifier).
     "Cleaned · original" preview of a subtraction, one-time discovery hint,
     recent-names suggestions, Reset button. **Next: verify end-to-end on a real
     recording in the app, then add polish / close.**
+
+## 2026-10-02 — Doubling safety net shipped (engine + UI)
+Triggered by a real doubled transcript (Petr Sochůrek). Root cause: two mix
+tracks (both carrying both voices) were transcribed → every line written twice.
+Subtraction/gating were NOT the bug (they work when configured right). Fix
+(user-chose: keep manual control + add a safety net; do NOT re-enable auto):
+
+- **Engine** (`src/track_separation.py`): `detect_shared_voice()` (windowed,
+  median-aggregated correlation + activity-containment direction + unity-gain
+  check), `resolve_shared_voice()` (warnings → suggested subtractions/drops),
+  `gate_to_reference()` (mix-relative hard-zero gate replacing the no-op own-RMS
+  gate in the isolate render path), and a segment option on `decode_track_pcm`.
+- **Validated on all 25 multi-track calls**: 22 → correct clean 2-speaker plan;
+  3 correctly flagged (Radoslav = no real separation in the recording; Martin =
+  complex 6-track, warning right / auto-fix best-effort). Clean configs never
+  warn. (Detail in `wiki.md`.)
+- **UI** (`app/ui.py`, UX-expert-designed): async PCM analysis after track probe
+  → stored on the Job; an inline **warning banner** (⚠ + plain-language plan +
+  "Fix automatically" / "Keep as is"), a per-track **"⚠ same voice as {Name}"**
+  marker reusing the status label, one-click fix with **Undo** snapshot, and a
+  **soft-block confirm at Start** ("Fix and start / Start anyway / Cancel"). The
+  "still live?" check is a cheap pure function re-run on every selection/
+  subtraction change (detector runs once); a correctly-configured job is silent.
+- **Tests**: `tests/test_track_separation.py` +9 (detector direction/duplicate/
+  silence, gate attenuation/keep, resolve). Full suite 97 passed; app boots clean.
+
+**Still open:** real end-to-end run in the actual app on one call (the engine
+path + UI logic are verified separately; a full click-through on the user's
+machine is the last check).
+
+## ▶ RESUME HERE (safety-net shipped 2026-10-02, committed)
+Done & committed: shared-voice doubling safety net (detector + resolve + banner +
+per-track ⚠ marker + Start-time confirm + mix-relative gate). 97 tests pass; app
+boots; full UI flow (warn → Fix automatically → Undo) verified live; detector
+validated on all 25 real multi-track calls (22 auto-correct, 3 correctly flagged).
+**Next session — the one remaining check:** open the Petr Sochůrek call in the
+actual app, confirm the ⚠ banner appears, click "Fix automatically", transcribe,
+and confirm the output has each speaker ONCE (no doubling). Then spot-check that
+a 6-track file (e.g. Martin) shows the warning and the manual controls still let
+you adjust the best-effort auto-fix. If all good, this update can close.
+Known edge cases (expected, not bugs): `Radoslav` = tracks are all the same
+content → collapses to 1 speaker; `Martin` (6-track) → warning correct, auto-fix
+best-effort.
