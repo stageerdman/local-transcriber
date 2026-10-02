@@ -16,8 +16,51 @@ class TranscribedSegment:
     text: str
 
 
+# Logical id for the locally-converted Czech-finetuned Whisper large-v3 (see
+# `scripts/convert_czech_model.py`). Kept as a short token in the model catalog
+# so the catalog stays portable; `_resolve_model` maps it to the on-disk path.
+CZECH_FT_ID = "czech-large-v3-mlx"
+CZECH_FT_PATH = (
+    Path.home() / ".cache" / "local-transcriber" / "models"
+    / "whisper-large-v3-czech-cv13-mlx"
+)
+
+
+def _resolve_model(model_name: str) -> str:
+    """Map a catalog model id to what the backend actually loads.
+
+    Only the Czech-finetune token needs resolving (to its converted local MLX
+    dir); every other id is an mlx-community repo passed through unchanged.
+    """
+    if model_name == CZECH_FT_ID:
+        if not CZECH_FT_PATH.exists():
+            raise RuntimeError(
+                "The Czech-finetuned model isn't installed yet. Run "
+                "`python scripts/convert_czech_model.py` once to convert it."
+            )
+        return str(CZECH_FT_PATH)
+    return model_name
+
+
 def _is_parakeet_model(model_name: str) -> bool:
     return "parakeet" in model_name.lower()
+
+
+# Tuned Whisper decode options (validated in the transcription-quality-research
+# update). `condition_on_previous_text=False` is the single most important flag:
+# it stops one hallucinated/looped segment from poisoning every later window -
+# the dominant failure mode on conversational audio with pauses, and on the
+# subtraction-residual tracks produced by mic-bleed removal. The shortened
+# temperature ladder drops the high-temp retries that invent text. No
+# `initial_prompt` on purpose - a content-ful Czech prompt leaked into the
+# output as fabricated text in testing.
+WHISPER_DECODE_OPTS: dict[str, Any] = {
+    "condition_on_previous_text": False,
+    "temperature": (0.0, 0.2, 0.4),
+    "no_speech_threshold": 0.6,
+    "compression_ratio_threshold": 2.4,
+    "logprob_threshold": -1.0,
+}
 
 
 def ensure_mlx_whisper_available() -> None:
@@ -74,7 +117,7 @@ def ensure_model_loaded(model_name: str) -> None:
         import mlx.core as mx
         from mlx_whisper.transcribe import ModelHolder
 
-        ModelHolder.get_model(model_name, mx.float16)
+        ModelHolder.get_model(_resolve_model(model_name), mx.float16)
     except Exception:
         # Best-effort only: if mlx_whisper's internals change, fall back to
         # letting transcribe() load the model itself.
@@ -86,6 +129,7 @@ def transcribe_mp3_segments(
     audio_path: Path,
     language: str | None = None,
     progress_callback: ProgressCallback | None = None,
+    use_vad: bool = True,
 ) -> list[TranscribedSegment]:
     """Transcribe, keeping per-segment/sentence timestamps.
 
@@ -95,28 +139,130 @@ def transcribe_mp3_segments(
     into speaker-labeled blocks for multi-track jobs.
 
     `progress_callback`, if given, is invoked with a fraction in [0, 1] of the
-    audio processed so far. Only the Parakeet backend reports it (and only for
-    files long enough to be chunked); mlx-whisper's transcribe() exposes no
-    progress hook, so the callback simply never fires there and the caller
-    falls back to a time estimate.
+    audio processed so far. Both backends report it: Parakeet per chunk,
+    Whisper per VAD speech-region.
+
+    `use_vad` (Whisper path only): run Silero VAD first and transcribe only the
+    speech regions. This is the fix for Whisper's silence-hallucination - on
+    quiet stretches and the subtraction-residual tracks from mic-bleed removal,
+    Whisper otherwise invents boilerplate ("Titulky vytvořil...") or loops.
+    Parakeet has no such failure mode and ignores this flag.
     """
     if _is_parakeet_model(model_name):
         return _transcribe_with_parakeet(model_name, audio_path, progress_callback)
 
+    repo = _resolve_model(model_name)
+    if use_vad:
+        return _transcribe_whisper_vad(repo, audio_path, language, progress_callback)
+    return _transcribe_whisper_plain(repo, audio_path, language)
+
+
+def _transcribe_whisper_plain(
+    repo: str, audio_path: Path, language: str | None
+) -> list[TranscribedSegment]:
     ensure_mlx_whisper_available()
     import mlx_whisper
 
     result = mlx_whisper.transcribe(
         str(audio_path),
-        path_or_hf_repo=model_name,
+        path_or_hf_repo=repo,
         language=language,
         verbose=False,
+        **WHISPER_DECODE_OPTS,
     )
     return [
         TranscribedSegment(start=float(seg["start"]), end=float(seg["end"]), text=seg.get("text", "").strip())
         for seg in result.get("segments", [])
         if seg.get("text", "").strip()
     ]
+
+
+# Silero VAD chunking: keep each decode under Whisper's 30 s window, pad speech a
+# little so leading/trailing phonemes aren't clipped, and bridge short gaps so we
+# don't fragment one sentence into many tiny decodes.
+_VAD_SAMPLE_RATE = 16000
+_VAD_MAX_CHUNK_SECONDS = 28.0
+_VAD_MERGE_GAP_SECONDS = 0.4
+
+
+def _speech_chunks(audio) -> list[tuple[int, int]]:
+    """Silero VAD -> list of (start_sample, end_sample) speech chunks.
+
+    Regions from `get_speech_timestamps` are grouped greedily into chunks up to
+    `_VAD_MAX_CHUNK_SECONDS` so each is a single Whisper decode window.
+    """
+    from faster_whisper.vad import VadOptions, get_speech_timestamps
+
+    options = VadOptions(
+        min_silence_duration_ms=400,
+        speech_pad_ms=200,
+        max_speech_duration_s=_VAD_MAX_CHUNK_SECONDS,
+    )
+    regions = get_speech_timestamps(audio, options, sampling_rate=_VAD_SAMPLE_RATE)
+    return _group_regions(
+        [(int(r["start"]), int(r["end"])) for r in regions],
+        max_len=int(_VAD_MAX_CHUNK_SECONDS * _VAD_SAMPLE_RATE),
+        merge_gap=int(_VAD_MERGE_GAP_SECONDS * _VAD_SAMPLE_RATE),
+    )
+
+
+def _group_regions(
+    regions: list[tuple[int, int]], max_len: int, merge_gap: int
+) -> list[tuple[int, int]]:
+    """Greedily merge adjacent speech regions into chunks.
+
+    A region is appended to the previous chunk when the gap between them is
+    small (<= merge_gap) and the combined span stays under max_len; otherwise it
+    starts a new chunk. Pure function of its inputs - unit-tested directly.
+    """
+    chunks: list[tuple[int, int]] = []
+    for s, e in regions:
+        if chunks and s - chunks[-1][1] <= merge_gap and e - chunks[-1][0] <= max_len:
+            chunks[-1] = (chunks[-1][0], e)
+        else:
+            chunks.append((s, e))
+    return chunks
+
+
+def _transcribe_whisper_vad(
+    repo: str,
+    audio_path: Path,
+    language: str | None,
+    progress_callback: ProgressCallback | None,
+) -> list[TranscribedSegment]:
+    ensure_mlx_whisper_available()
+    import mlx_whisper
+    from mlx_whisper.audio import load_audio
+
+    audio = load_audio(str(audio_path))  # float32 mono @ 16 kHz
+    chunks = _speech_chunks(audio)
+    if not chunks:
+        return []
+
+    total_speech = sum(e - s for s, e in chunks) or 1
+    done_speech = 0
+    segments: list[TranscribedSegment] = []
+    for start, end in chunks:
+        offset = start / _VAD_SAMPLE_RATE
+        result = mlx_whisper.transcribe(
+            audio[start:end],
+            path_or_hf_repo=repo,
+            language=language,
+            verbose=False,
+            **WHISPER_DECODE_OPTS,
+        )
+        for seg in result.get("segments", []):
+            text = seg.get("text", "").strip()
+            if text:
+                segments.append(TranscribedSegment(
+                    start=offset + float(seg["start"]),
+                    end=offset + float(seg["end"]),
+                    text=text,
+                ))
+        done_speech += end - start
+        if progress_callback is not None:
+            progress_callback(min(1.0, done_speech / total_speech))
+    return segments
 
 
 # parakeet_mlx.transcribe()'s own `chunk_duration` default is None - "process

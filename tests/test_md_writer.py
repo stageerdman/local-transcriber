@@ -89,6 +89,44 @@ def test_write_transcript_markdown_omits_speakers_and_diarization_when_not_given
     assert "diarization:" not in content
 
 
+def test_polished_transcript_writes_raw_sibling_and_flags(tmp_path: Path) -> None:
+    source = tmp_path / "call.mp4"
+    source.touch()
+
+    md_path = write_transcript_markdown(
+        source,
+        "Ahoj, jak se máš?\n",
+        model="czech-large-v3-mlx",
+        language="cs",
+        elapsed_seconds=5.0,
+        output_dir=tmp_path,
+        polished=True,
+        raw_transcript_text="ahoj jak se máš\n",
+    )
+
+    main = md_path.read_text(encoding="utf-8")
+    assert "polished: true" in main
+    assert main.endswith("Ahoj, jak se máš?\n")
+
+    raw_path = md_path.with_name("call.raw.md")
+    assert raw_path.exists()
+    raw = raw_path.read_text(encoding="utf-8")
+    assert "polished: false" in raw
+    assert raw.endswith("ahoj jak se máš\n")
+
+
+def test_unpolished_transcript_writes_no_raw_sibling_and_no_flag(tmp_path: Path) -> None:
+    source = tmp_path / "call.mp4"
+    source.touch()
+
+    md_path = write_transcript_markdown(
+        source, "Text.\n", model="m", language="cs", elapsed_seconds=1.0, output_dir=tmp_path
+    )
+
+    assert "polished:" not in md_path.read_text(encoding="utf-8")
+    assert not md_path.with_name("call.raw.md").exists()
+
+
 def test_write_transcript_markdown_writes_to_output_dir_not_next_to_source(tmp_path: Path) -> None:
     source_dir = tmp_path / "source"
     source_dir.mkdir()

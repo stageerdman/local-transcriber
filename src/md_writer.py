@@ -31,26 +31,38 @@ def write_transcript_markdown(
     output_dir: Path | None = None,
     speakers: int | None = None,
     diarization: str | None = None,
+    polished: bool = False,
+    raw_transcript_text: str | None = None,
 ) -> Path:
     transcribed_at = transcribed_at or datetime.now()
     output_dir = output_dir or default_output_dir()
     output_dir.mkdir(parents=True, exist_ok=True)
     md_path = next_available_path(output_dir / f"{source_path.stem}.md")
 
-    fields = [
-        "---",
-        f"source: {source_path}",
-        f"model: {model}",
-        f"language: {language or 'auto'}",
-        f"transcribed_at: {transcribed_at.isoformat(timespec='seconds')}",
-        f"elapsed_seconds: {round(elapsed_seconds)}",
-    ]
-    if speakers is not None:
-        fields.append(f"speakers: {speakers}")
-    if diarization is not None:
-        fields.append(f"diarization: {diarization}")
-    fields += ["---", ""]
+    def _frontmatter(is_raw: bool) -> str:
+        fields = [
+            "---",
+            f"source: {source_path}",
+            f"model: {model}",
+            f"language: {language or 'auto'}",
+            f"transcribed_at: {transcribed_at.isoformat(timespec='seconds')}",
+            f"elapsed_seconds: {round(elapsed_seconds)}",
+        ]
+        if speakers is not None:
+            fields.append(f"speakers: {speakers}")
+        if diarization is not None:
+            fields.append(f"diarization: {diarization}")
+        if polished:
+            fields.append(f"polished: {'false' if is_raw else 'true'}")
+        fields += ["---", ""]
+        return "\n".join(fields)
 
-    frontmatter = "\n".join(fields)
-    md_path.write_text(frontmatter + "\n" + transcript_text, encoding="utf-8")
+    md_path.write_text(_frontmatter(is_raw=False) + "\n" + transcript_text, encoding="utf-8")
+
+    # Keep the raw (un-polished) transcript alongside the cleaned one so the
+    # LLM pass is always a non-destructive, reviewable derivation.
+    if raw_transcript_text is not None:
+        raw_path = md_path.with_name(f"{md_path.stem}.raw.md")
+        raw_path.write_text(_frontmatter(is_raw=True) + "\n" + raw_transcript_text, encoding="utf-8")
+
     return md_path
