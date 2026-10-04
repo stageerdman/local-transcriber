@@ -1,6 +1,6 @@
 # Web-UI rewrite — update v1 (OPEN)
 
-**Status: OPEN — building (Phase 1 shipped 2026-10-04)**
+**Status: OPEN — building (Phases 1–4 shipped 2026-10-04; pending real-app verify)**
 
 ## Goal
 Replace the Tkinter UI with a from-scratch, beautiful native front-end — the
@@ -39,11 +39,11 @@ wired to Python through a `Bridge` (js_api). Fully offline, no browser.
 ## Roadmap (phases)
 1. **Native shell** — pywebview window renders the approved UI; bridge stub. ✅ DONE.
    Run: `.venv/bin/python -m app.webview_main`.
-2. **History + settings** — populate recent calls from `history_db`; load/save
+2. ✅ **History + settings** — populate recent calls from `history_db`; load/save
    quality/tidy/language via settings.json. Replace the JS mock data with bridge calls.
-3. **Add + detect** — native file pick/drop → probe tracks → detect speakers
+3. ✅ **Add + detect** — native file pick/drop → probe tracks → detect speakers
    (track_separation) → "Who's on this call" from real data.
-4. **Transcribe** — run the engine (reuse worker logic), stream real progress to
+4. ✅ **Transcribe** — run the engine (reuse worker logic), stream real progress to
    the queue, render the finished `.md` as the two-voice transcript.
 5. **Fix speakers** — wire the ghost-remove / language / cleanup to real
    subtractions; re-run non-destructively.
