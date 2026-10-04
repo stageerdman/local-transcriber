@@ -79,3 +79,34 @@ Kill `Person N` (→ named/`Speaker N`) + named directional language in the
 card/rows + speakers-count header + skipped-in-place (no silent uncheck). That
 subset alone makes every sentence intelligible and the outcome predictable —
 the literal complaints — before the richer card/preview/CTA work.
+
+---
+
+## Implementation status (2026-10-04)
+
+SHIPPED (committed, verified via headless Tk render + interaction smoke + 112 tests):
+- Ph1: default names Person N -> Speaker N (src/audio_tracks + worker + ui).
+- Ph2: people-first header ("N speakers will be transcribed · M skipped");
+  per-track state model (clean/isolated/skipped_dup/excluded/conflict) driving a
+  chip + plain-language reason line + inline Include/Undo links; skipped tracks
+  dimmed in place (never silently removed).
+- Ph3: auto-apply the keep/isolate/skip plan on detection; calm GREEN plan card
+  ("✓ Set up to transcribe each person once — You'll get 2 speakers: …" +
+  "Transcribe every track instead"); AMBER only when the user reverts and a voice
+  really would double. Directional, jargon-free copy throughout.
+- Ph4: deleted the askyesnocancel Start modal; no-expand Start auto-applies too.
+- Ph5: recent-name suggestions (editable combobox, MRU in settings).
+- Ph6: previewing a track focuses its name field (listen->label).
+
+DEFERRED polish (low-risk, documented for a later pass):
+- First-speech ordering of default Speaker-N labels; ghost-text placeholder
+  styling; "from file" provenance marker when a stream carries a title tag.
+- Dedicated A/B "Listen: Track 1 ⟷ Track 3" button on the card (per-row ▶ covers
+  verification for now).
+- Dynamic bottom CTA ("▶ Transcribe 2 speakers"); grid-aligned row columns
+  (kept pack layout + checkbox per expert-2's recommendation).
+- Enter-commits-and-advances-to-next-unnamed-track rhythm.
+
+VERIFY GATE (per CLAUDE.md "run the actual app"): headless render + interaction
+smoke pass; a human run of `python -m app.main` on the Petr Sochůrek call is the
+final confirmation before closing.
