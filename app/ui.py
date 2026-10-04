@@ -682,13 +682,18 @@ class MainWindow:
                 row.track_checkbuttons.append(checkbutton)
 
             # Editable speaker name - becomes the transcript's speaker label.
+            # A combobox (free-type) offers recently-used names, since the same
+            # speakers ("Klient"/"Obchodník") recur across calls.
             name_var = tk.StringVar(value=self._current_track_name(job, stream))
             row.track_name_vars[stream.index] = name_var
-            name_entry = ttk.Entry(track_row, textvariable=name_var, width=14)
+            name_entry = ttk.Combobox(
+                track_row, textvariable=name_var, width=13, values=self._recent_names()
+            )
             name_entry.configure(state="normal" if editable else "disabled")
             name_entry.pack(side="left", padx=(2, 6))
             name_entry.bind("<Return>", lambda _e, s=stream, v=name_var: self._commit_track_name(job, s, v))
             name_entry.bind("<FocusOut>", lambda _e, s=stream, v=name_var: self._commit_track_name(job, s, v))
+            name_entry.bind("<<ComboboxSelected>>", lambda _e, s=stream, v=name_var: self._commit_track_name(job, s, v))
             row.track_name_entries[stream.index] = name_entry
 
             # Detail-drawer disclosure (language / noise / remove-a-voice).
@@ -757,6 +762,21 @@ class MainWindow:
         stream = next((s for s in (job.tracks or []) if s.index == index), None)
         return self._current_track_name(job, stream) if stream else f"Speaker {index}"
 
+    def _recent_names(self) -> list[str]:
+        """Recently-used speaker names, most-recent first, for the name dropdown."""
+        names = self.settings.get("recent_names", [])
+        return names if isinstance(names, list) else []
+
+    def _push_recent_name(self, name: str) -> None:
+        """Remember a user-typed name so it's suggested on the next call."""
+        default = name.startswith("Speaker ") and name[8:].isdigit()
+        if not name or default:
+            return
+        recent = [n for n in self._recent_names() if n != name]
+        recent.insert(0, name)
+        self.settings["recent_names"] = recent[:12]
+        _save_settings(self.settings)
+
     def _commit_track_name(self, job: Job, stream: AudioStream, var: tk.StringVar) -> None:
         if job.status != "ready":
             return
@@ -769,6 +789,7 @@ class MainWindow:
         if job.track_names.get(stream.index) == name:
             return
         job.track_names[stream.index] = name
+        self._push_recent_name(name)
         # Other rows reference this name (subtraction summaries); refresh all.
         for s in job.tracks or []:
             self._update_track_status(job, s)
@@ -979,12 +1000,14 @@ class MainWindow:
         if label is not None:
             text, color = self._track_chip(state)
             label.configure(text=text, foreground=color)
-        # Dim a skipped/excluded track's name so it reads as "not a speaker".
+        # A skipped/excluded track isn't a speaker, so disable its name field
+        # (greys it natively) - you can't name something that won't be written.
         entry = row.track_name_entries.get(stream.index)
         if entry is not None:
+            editable = job.status == "ready"
             dimmed = state in ("skipped_dup", "excluded")
             try:
-                entry.configure(foreground=MUTED_FG if dimmed else "")
+                entry.configure(state="disabled" if (dimmed or not editable) else "normal")
             except tk.TclError:
                 pass
         self._render_track_reason(job, stream, state)
