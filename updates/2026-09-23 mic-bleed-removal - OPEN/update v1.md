@@ -300,3 +300,17 @@ you adjust the best-effort auto-fix. If all good, this update can close.
 Known edge cases (expected, not bugs): `Radoslav` = tracks are all the same
 content → collapses to 1 speaker; `Martin` (6-track) → warning correct, auto-fix
 best-effort.
+
+## 2026-10-04 — Doubling recurred → auto-apply + text backstop shipped
+Real transcript still doubled (~15%) because the validated separation plan was a
+UI suggestion that a plain Start never applied. Shipped two layers (see `wiki.md`):
+1. **Worker auto-applies** `detect_shared_voice`+`resolve_shared_voice` by default
+   (`_auto_apply_separation`), user override wins, never drops the last track.
+2. **Text echo backstop** `dialogue.drop_cross_speaker_echoes` after block-merge,
+   relative-energy keep/drop — removes 95% of any residual doubling.
+Tests: `tests/test_dialogue_dedup.py` (11) + `tests/test_worker_auto_separation.py`
+(4); full suite 112 passed. Verified on the real Petr Sochůrek window end-to-end:
+isolate→salesperson only, keep→client only, **0 cross-speaker duplicates**.
+
+**Still open (CLOSE-gate):** one full-length run in the actual app on the Petr
+Sochůrek call to confirm the whole file comes out clean, then flip to CLOSED.

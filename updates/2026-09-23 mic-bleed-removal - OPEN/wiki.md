@@ -434,3 +434,47 @@ plus fix the gating quality. Did NOT re-enable auto-classification.
 optimal (global scalar == block-wise == short-FIR on real audio — same residual),
 so no adaptive filter was added. The doubling was wrong TRACK SELECTION (two
 mixes both transcribed), which the safety-net now catches.
+
+## 2026-10-04 — Doubling recurred in a real transcript → two-layer fix
+
+**Symptom.** "Sales Call - Petr Sochůrek (2).md" (Oct 4) still doubled: ~15% of
+the transcript was the same utterance under both speakers (176 cross-speaker
+near-duplicate block pairs; sim 0.86–0.93, ~1s apart).
+
+**Root cause.** The shipped safety-net is a UI *suggestion* — the correct plan
+(`isolate 1−3 / keep 3 / drop 2`, exactly what `resolve_shared_voice` returns and
+what was validated across 25 calls) only applies if the user clicks "Fix
+automatically". A plain Start never applied it, so two mix-carrying tracks were
+transcribed raw and the client's voice (loud on his clean track, a quiet bleed on
+the salesperson's mix track) came out twice. Confirmed by decoding the 3 streams:
+track 3 = clean client, tracks 1 & 2 = near-duplicate mixes (client + salesperson).
+
+**Fix — defense in depth (both layers shipped):**
+1. **Auto-apply separation** (`app/worker.TranscriptionWorker._auto_apply_separation`).
+   On a multi-track job with no user-configured subtraction, the worker runs
+   `detect_shared_voice` + `resolve_shared_voice` on a 90s window and applies the
+   plan (isolate mixes, drop duplicates) before transcribing. User overrides win;
+   never drops the last track; best-effort (any failure → no-op). Verified on the
+   real window: track 1 isolated → **salesperson only**, track 3 → **client only**,
+   **0 doubling**.
+2. **Text-level echo backstop** (`src.dialogue.drop_cross_speaker_echoes`). Runs
+   after block-merge, no matter how separation was configured — the net for
+   residual bleed. Two different-speaker turns that overlap in time and are
+   substantially the same text are an echo; the quieter copy is dropped. On the
+   real output it removed **95% of the doubling (176 → 8 residual pairs)**.
+
+**Why block-level, not segment-level.** Tracks chop the same audio at different
+segment boundaries, so raw segments don't match 1:1. Merging each speaker's turn
+into a block first makes the doubled turns line up.
+
+**Why RELATIVE energy (seg RMS / track RMS), not absolute.** The clean track can
+be lower-gain than a mix, so a bleed copy is sometimes *absolutely* louder than
+the real copy on the quiet clean track. Per-track-relative, the real copy always
+wins (e.g. "Jsem tady proto": clean rel 1.06 vs mix-bleed rel 0.58).
+
+**On a pure energy threshold (the "just drop low-energy text" idea).** Tempting —
+on a *mix* track the real speaker sits at rel 1.1–1.9 and the bleed at 0.4–0.85, a
+clean gap. But on a *clean single-speaker* track real speech runs down to rel 0.71,
+so a blanket low-energy drop would delete soft real speech. Not safe standalone;
+used only as the comparative keep/drop signal in the backstop. With auto-separation
+applied, gating isn't needed anyway (subtraction + `gate_to_reference` handle it).
