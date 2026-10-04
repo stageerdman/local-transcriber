@@ -89,7 +89,7 @@ def test_track_speaker_names_falls_back_to_person_n_without_titles(tmp_path: Pat
 
     streams = probe_audio_streams(media)
 
-    assert track_speaker_names(streams) == ["Person 1", "Person 2"]
+    assert track_speaker_names(streams) == ["Speaker 1", "Speaker 2"]
 
 
 def test_single_track_file_is_not_multi_track(tmp_path: Path) -> None:

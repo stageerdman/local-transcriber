@@ -413,7 +413,7 @@ class TranscriptionWorker(threading.Thread):
         channels = job.selected_channel_by_track or {}
 
         def label_for(index: int) -> str:
-            return names.get(index) or default_names.get(index, f"Person {index}")
+            return names.get(index) or default_names.get(index, f"Speaker {index}")
 
         # Decode every track we'll need: the ones to transcribe plus any track
         # used only as a subtraction reference. Tracks share the container's

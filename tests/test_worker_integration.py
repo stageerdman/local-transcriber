@@ -102,7 +102,7 @@ def test_multitrack_extraction_and_merge_produces_interruption_flagged_dialogue(
     )
     streams = probe_audio_streams(media)
     names = track_speaker_names(streams)
-    assert names == ["Person 1", "Person 2"]
+    assert names == ["Speaker 1", "Speaker 2"]
 
     track0 = tmp_path / "track0.mp3"
     track1 = tmp_path / "track1.mp3"
@@ -111,7 +111,7 @@ def test_multitrack_extraction_and_merge_produces_interruption_flagged_dialogue(
     assert track0.exists() and track1.exists()
 
     # Simulate what per-track whisper transcription would have returned:
-    # Person 1 speaks 0-3s, Person 2 interrupts at 1.5-2.5s.
+    # Speaker 1 speaks 0-3s, Speaker 2 interrupts at 1.5-2.5s.
     labeled = [
         dialogue.Segment(speaker=names[0], start=0.0, end=3.0, text="So I wanted to go over the proposal"),
         dialogue.Segment(speaker=names[1], start=1.5, end=2.5, text="actually before that"),
@@ -120,4 +120,4 @@ def test_multitrack_extraction_and_merge_produces_interruption_flagged_dialogue(
     rendered = dialogue.render_blocks_markdown(blocks)
 
     assert "(interrupting)" in rendered
-    assert rendered.index("Person 1") < rendered.index("Person 2")
+    assert rendered.index("Speaker 1") < rendered.index("Speaker 2")

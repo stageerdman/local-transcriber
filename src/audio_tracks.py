@@ -111,10 +111,17 @@ def extract_track_to_mp3(source: Path, stream_index: int, output_path: Path) -> 
 
 
 def track_speaker_names(streams: list[AudioStream]) -> list[str]:
-    """Display name per track: the stream's title/handler tag if present, else "Person N"."""
+    """Display name per track: the stream's title/handler tag if present, else
+    "Speaker N".
+
+    "Speaker N" (not "Person N") on purpose: it reads as a replaceable slot the
+    user is meant to rename, not as a fixed count of real people - the latter
+    collides confusingly with the app's own "N people on this call" summary and
+    with the fact that one person can be spread across several tracks.
+    """
     names = []
     for i, stream in enumerate(streams, start=1):
-        names.append(stream.title if stream.title else f"Person {i}")
+        names.append(stream.title if stream.title else f"Speaker {i}")
     return names
 
 

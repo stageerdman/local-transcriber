@@ -729,7 +729,7 @@ class MainWindow:
     def _track_default_name(self, job: Job, stream: AudioStream) -> str:
         tracks = job.tracks or [stream]
         names = track_speaker_names(tracks)
-        return dict(zip((s.index for s in tracks), names)).get(stream.index, f"Person {stream.index}")
+        return dict(zip((s.index for s in tracks), names)).get(stream.index, f"Speaker {stream.index}")
 
     def _current_track_name(self, job: Job, stream: AudioStream) -> str:
         override = (job.track_names or {}).get(stream.index)
@@ -737,7 +737,7 @@ class MainWindow:
 
     def _track_name_by_index(self, job: Job, index: int) -> str:
         stream = next((s for s in (job.tracks or []) if s.index == index), None)
-        return self._current_track_name(job, stream) if stream else f"Person {index}"
+        return self._current_track_name(job, stream) if stream else f"Speaker {index}"
 
     def _commit_track_name(self, job: Job, stream: AudioStream, var: tk.StringVar) -> None:
         if job.status != "ready":
