@@ -1554,9 +1554,6 @@ class MainWindow:
         self._recompute_estimate(job)
         self._render_tracks_section(job)
 
-    def _dismiss_shared_voice(self, job: Job) -> None:
-        job.shared_voice_dismissed = True
-        self._render_tracks_section(job)
 
     def _draw_envelope(self, canvas: tk.Canvas) -> None:
         envelope = getattr(canvas, "_envelope", None)
@@ -1728,17 +1725,16 @@ class MainWindow:
             self._reset_job(job)
 
     def _start_job(self, job: Job) -> None:
-        # The shared-voice check needs the tracks analyzed. If the user never
+        # The shared-voice setup needs the tracks analyzed. If the user never
         # opened the track panel, do it now (in the background) and resume Start
-        # when it's ready - so the safety net fires even without expanding.
+        # when it's ready - so auto-separation fires even without expanding.
         if job.shared_voice_warnings is None and (job.tracks is None or len(job.tracks) > 1):
             self._analyze_then_start(job)
             return
-        # Backstop: if two selected tracks still carry the same voice, make the
-        # user actively choose before shipping a doubled transcript.
-        unhandled = self._unhandled_shared_voice(job)
-        if unhandled and not self._confirm_shared_voice_start(job, unhandled):
-            return
+        # No modal: the plan is auto-applied and the inline card already explains
+        # it (and warns, in amber, if the user reverted to every track). The
+        # worker also auto-separates + de-duplicates as a backstop, so Start just
+        # runs.
         job.status = "queued"
         self._refresh_row(job)
         self.job_queue.put(job)
@@ -1768,30 +1764,18 @@ class MainWindow:
             job.shared_voice_warnings = warnings
             job.shared_voice_analyzed = True
             job.status_detail = None
-            self._start_job(job)  # re-enter: now analyzed -> guard can fire
+            # Auto-apply the plan (same as when the panel is open) so starting
+            # without expanding still transcribes each person once.
+            if (
+                warnings
+                and not job.shared_voice_fixed
+                and not job.shared_voice_dismissed
+                and self._unhandled_shared_voice(job)
+            ):
+                self._apply_shared_voice_fix(job, auto=True)
+            self._start_job(job)  # re-enter: now analyzed
 
         threading.Thread(target=work, daemon=True).start()
-
-    def _confirm_shared_voice_start(self, job: Job, unhandled: list) -> bool:
-        """Soft-block at Start. Returns True if the job should proceed."""
-        from tkinter import messagebox
-
-        names = sorted({self._track_name_by_index(job, w.component_index) for w in unhandled})
-        who = " and ".join(f'"{n}"' for n in names)
-        answer = messagebox.askyesnocancel(
-            "Same voice on two tracks",
-            f"{who} is on two tracks and would be written twice in the transcript.\n\n"
-            "Fix this automatically before transcribing?\n\n"
-            "Yes — fix and start    ·    No — start anyway    ·    Cancel",
-            icon="warning",
-            parent=self.root,
-        )
-        if answer is None:  # Cancel
-            return False
-        if answer:  # Yes -> fix, then start
-            self._apply_shared_voice_fix(job)
-            return True
-        return True  # No -> start anyway
 
     def _stop_job(self, job: Job) -> None:
         job.stop_event.set()
