@@ -413,7 +413,7 @@
       <span class="mark"><svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"><path d="M12 3v18M7 7v10M17 7v10M3 11v2M21 11v2"/></svg></span>
       <span class="name">Transcriber</span>
     </div>
-    <button class="newbtn" onclick="show('new')">
+    <button class="newbtn" onclick="newCall()">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
       New call
     </button>
@@ -434,7 +434,7 @@
     <section class="view home" id="view-home">
       <div class="home-inner">
         <h1 class="greet">Good afternoon, Jakub.</h1>
-        <div class="drop" onclick="show('new')">
+        <div class="drop" onclick="newCall()">
           <div class="wave" aria-hidden="true"></div>
           <h3>Drop a call — or a whole folder of them</h3>
           <p>Audio or video</p>
@@ -588,8 +588,8 @@
   document.querySelectorAll('.proc .bars').forEach(w=>fillWave(w,40,14,56,3));
   document.querySelectorAll('.speaker .mini').forEach(w=>{w.innerHTML='';const n=22;for(let i=0;i<n;i++){const v=4+18*(0.3+0.7*rnd((+w.dataset.seed)+i*2.1));w.innerHTML+=`<i style="height:${v}px;background:var(--c)"></i>`}});
 
-  // transcript data (cleaned excerpt, Klient = client / Obchodník = coach)
-  const turns=[
+  // transcript data (cleaned excerpt, used as the demo when no engine is attached)
+  const MOCK_TURNS=[
     ['b','00:09',"Tak, jsme připraveni. Já se vám trochu představím — volali jsme si jen krátce."],
     ['a','00:19',"Já se omlouvám, včera jsem to s manželkou v autě nečekal, ten telefon mě zastihl nepřipraveného."],
     ['b','00:36',"To nic, chápu. Mně došlo, že jsem se nezeptal, jestli je vhodná chvíle — za to se omlouvám já."],
@@ -600,15 +600,27 @@
     ['a','02:40',"Dobře. Jsem ženatý dvacet let, tohle je druhý vztah. Máme dvě děti, dcera je velká, synovi bude sedmnáct."],
     ['b','03:05',"Děkuju, že to sdílíte. A ta erektilní dysfunkce — řekl byste, že přišla s věkem, nebo spíš se stresem?"],
     ['a','03:22',"Spíš s věkem, myslím. Dřív to nebyl problém. Byl jsem u sexologa, ale moc to nikam nevedlo."],
-  ];
-  const names={a:'Klient',b:'Obchodník'};
-  const sc=document.getElementById('script');
-  sc.innerHTML=turns.map((t,i)=>`
-    <div class="turn turn--${t[0]} ${i===4?'playing':''}" data-i="${i}">
-      <div class="ts" onclick="seek(this)">${t[1]}</div>
-      <div><div class="spk"><span class="bar"></span>${names[t[0]]}</div>
-      <p class="say">${t[2]}</p></div>
-    </div>`).join('');
+  ].map(t=>({lane:t[0],ts:t[1],text:t[2],speaker:({a:'Klient',b:'Obchodník'})[t[0]]}));
+
+  function esc(s){return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+  function renderTranscript(data){
+    const turns=data.turns||[];
+    const laneName={};turns.forEach(t=>{if(t.lane&&t.speaker)laneName[t.lane]=t.speaker});
+    const nameA=laneName.a||'Speaker 1',nameB=laneName.b||'Speaker 2';
+    const title=document.querySelector('.t-title'); if(title)title.textContent=data.name||'Untitled';
+    const lgA=document.getElementById('lgA'),lgB=document.getElementById('lgB');
+    if(lgA)lgA.textContent=nameA; if(lgB)lgB.textContent=nameB;
+    const sub=document.querySelector('.t-sub');
+    if(sub)sub.innerHTML=(data.dur?`<span>${esc(data.dur)}</span>`:'')+(data.lang?`<span>·</span><span>${esc(data.lang)}</span>`:'');
+    document.getElementById('script').innerHTML=turns.map((t,i)=>`
+      <div class="turn turn--${t.lane||'a'}" data-i="${i}">
+        <div class="ts" onclick="seek(this)">${esc(t.ts)}</div>
+        <div>${t.speaker?`<div class="spk"><span class="bar"></span>${esc(t.speaker)}</div>`:''}
+        <p class="say">${esc(t.text)}</p></div>
+      </div>`).join('');
+  }
+  window.renderTranscript=renderTranscript;
+  renderTranscript({name:'Petr Sochůrek',dur:'1 hr 34 min',lang:'Czech',turns:MOCK_TURNS});
 
   // ---- unified calls model (drives sidebar queue + home library) ----
   // status: done | working | queued ; a batch transcribes one at a time.
@@ -650,8 +662,10 @@
   window.openCall=function(i,el){ if(calls[i].status!=='done')return; calls.forEach(c=>c.active=false); calls[i].active=true; renderCalls(); show('transcript'); };
 
   function updateBatch(){ /* batch widget removed; the Calls list shows the working item's own progress */ }
-  // live-drain the queue so the multi-call flow is visible
+  let mock=true;  // set false once the Python engine is attached
+  // live-drain the queue so the multi-call flow is visible in the demo
   setInterval(()=>{
+    if(!mock)return;
     const w=calls.find(c=>c.status==='working'); if(!w)return;
     w.prog+=2;
     if(w.prog>=100){ w.status='done'; w.when='Just now'; const nx=calls.find(c=>c.status==='queued'); if(nx){nx.status='working';nx.prog=4;} }
@@ -728,6 +742,92 @@
   window.pickQuality=function(el,q){document.querySelectorAll('#seg-detect .qpick').forEach(c=>c.classList.remove('sel'));el.classList.add('sel');
     const eta=document.getElementById('qeta');if(eta)eta.textContent=q==='Best'?'~18 min':'~3 min'};
   document.addEventListener('keydown',e=>{if(e.key==='Escape')closeFix()});
+
+  // ===== engine bridge (pywebview). Falls back to the mock demo when absent. =====
+  function api(){return (window.pywebview&&window.pywebview.api)||null}
+  let currentDetect=null;
+
+  window.newCall=function(){
+    const A=api();
+    if(!A){show('new');return;}
+    A.add_files().then(list=>{
+      if(!list||!list.length)return;
+      renderDetect(list[0]);
+      document.getElementById('seg-detect').classList.add('show');
+      document.getElementById('seg-proc').classList.remove('show');
+      show('new');
+    });
+  };
+  function renderDetect(call){
+    currentDetect=call;
+    const n=call.people.length;
+    const h=document.querySelector('#seg-detect h2');
+    if(h)h.textContent=n===1?'One person on this call':(n===2?'Two people on this call':`${n} people on this call`);
+    const rows=document.querySelectorAll('#seg-detect .speaker');
+    rows.forEach((row,i)=>{const p=call.people[i];
+      if(p){row.style.display='';const inp=row.querySelector('input');if(inp)inp.value=p.name;}
+      else row.style.display='none';});
+  }
+
+  window.openCall=function(i){
+    const c=calls[i]; if(!c||c.status!=='done')return;
+    calls.forEach(x=>x.active=false); c.active=true; renderCalls();
+    const A=api();
+    if(c.transcript){renderTranscript({name:c.name,dur:c.dur,turns:c.transcript.turns});show('transcript');return;}
+    if(A&&c.output){A.open_call(c.output).then(d=>{if(d&&!d.error)renderTranscript({name:d.name,dur:c.dur,turns:d.turns});show('transcript');});return;}
+    show('transcript');
+  };
+
+  window.startProc=function(){
+    const A=api();
+    if(A&&currentDetect){
+      const inputs=document.querySelectorAll('#seg-detect .speaker input');
+      const names={}; currentDetect.people.forEach((p,i)=>{names[p.index]=(inputs[i]&&inputs[i].value)||p.name});
+      const q=document.querySelector('#seg-detect .qpick.sel');
+      const quality=(q&&q.textContent.trim()==='Faster')?'Fast':'Best';
+      const tidy=!!document.querySelector('.qstep .sw.on');
+      A.set_settings({quality,tidy});
+      A.transcribe(currentDetect.id,{names,quality,tidy});
+      if(!calls.find(c=>c.id===currentDetect.id))
+        calls.unshift({id:currentDetect.id,name:currentDetect.name,status:'working',prog:0,seed:7});
+      renderCalls();renderCards();show('home');
+      return;
+    }
+    document.getElementById('seg-detect').classList.remove('show');
+    document.getElementById('seg-proc').classList.add('show');
+    const steps=['Separating speakers · about 6 min left','Removing overlap · about 5 min left','Transcribing · about 3 min left','Polishing the text · almost done'];
+    let i=0;const m=document.getElementById('procmsg');
+    const t=setInterval(()=>{i++;if(i>=steps.length){clearInterval(t);show('transcript');return}m.textContent=steps[i]},1400);
+  };
+
+  window.appEvent=function(ev,p){if(ev==='job')onJob(p)};
+  function onJob(p){
+    let c=calls.find(x=>x.id===p.id);
+    if(!c){c={id:p.id,name:p.name||'Call',status:'working',prog:0,seed:7};calls.unshift(c);}
+    if(p.status==='done'){c.status='done';c.prog=100;c.when='Just now';c.output=p.output;c.transcript=p.transcript;}
+    else if(p.status==='error'){c.status='error';c.err=p.error;}
+    else {c.status='working';if(typeof p.progress==='number')c.prog=p.progress;}
+    renderCalls();renderCards();
+  }
+
+  function applySettings(s){
+    document.querySelectorAll('#seg-detect .qpick').forEach(b=>{const isFast=b.textContent.trim()==='Faster';b.classList.toggle('sel',(s.quality==='Fast')===isFast);});
+    const eta=document.getElementById('qeta');if(eta)eta.textContent=s.quality==='Fast'?'~3 min':'~18 min';
+    const sw=document.querySelector('.qstep .sw');if(sw)sw.classList.toggle('on',!!s.tidy);
+  }
+  function initBridge(){
+    const A=api(); if(!A)return;
+    mock=false;
+    A.get_settings().then(applySettings).catch(()=>{});
+    A.recent_calls().then(list=>{
+      calls.length=0;(list||[]).forEach(c=>calls.push(Object.assign({seed:7,people:2},c)));
+      if(calls[0])calls[0].active=true;
+      renderCalls();renderCards();
+      if(calls[0]&&calls[0].output)window.openCall(0);
+    }).catch(()=>{});
+  }
+  window.addEventListener('pywebviewready',initBridge);
+  if(api())initBridge();
 })();
 </script>
 

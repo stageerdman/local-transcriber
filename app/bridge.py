@@ -219,6 +219,10 @@ class Bridge:
         subs, drop = track_separation.resolve_shared_voice(selected, warnings)
         job.track_subtractions = subs or None
         kept = [s for s in streams if s.index not in drop] or streams
+        # Pin the plan so the worker transcribes exactly these speakers (keep +
+        # isolate), not every raw track. The worker respects a preset selection
+        # and subtraction; the text backstop still runs underneath.
+        job.selected_track_indices = {s.index for s in kept}
         people = []
         for n, s in enumerate(kept):
             refs = (subs or {}).get(s.index, [])
