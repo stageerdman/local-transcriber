@@ -198,6 +198,9 @@ class MainWindow:
         self._track_details_open: set[tuple[int, int]] = set()
         # Pre-fix snapshot per job id, so a one-click shared-voice fix is undoable.
         self._shared_voice_undo: dict[int, tuple] = {}
+        # Job ids whose track panel is in "Edit tracks" (advanced) mode. Default
+        # is the simple speakers view; the raw-track editor is one quiet click away.
+        self._tracks_editing: set[int] = set()
         # Playhead per track as a fraction [0, 1] of its duration. Persists
         # after stop so ▶ resumes where it left off; reset to 0 when another
         # track takes over.
@@ -555,7 +558,8 @@ class MainWindow:
         )
         polish_check.pack(side="left", padx=(16, 0))
 
-        ttk.Label(expand_frame, text="Audio tracks", font=("", 9, "bold")).pack(anchor="w")
+        # No "Audio tracks" heading: the default panel shows PEOPLE (the speakers
+        # you'll get), not tracks. The raw-track editor lives behind "Edit tracks".
         tracks_container = ttk.Frame(expand_frame)
         tracks_container.pack(fill="x", pady=(4, 0))
 
@@ -607,6 +611,9 @@ class MainWindow:
         self._ensure_envelopes_loaded(job)
 
     def _render_tracks_section(self, job: Job) -> None:
+        """The panel shown when a job row is expanded. Default: a minimal list of
+        the PEOPLE you'll get (name + preview). The raw-track editor is behind a
+        quiet 'Edit tracks' link. A single combined recording shows no panel."""
         row = self.rows.get(job.id)
         if row is None:
             return
@@ -626,30 +633,91 @@ class MainWindow:
 
         tracks = job.tracks
         if tracks is None:
-            ttk.Label(row.tracks_container, text="Detecting audio tracks...", foreground="#777").pack(
-                anchor="w"
-            )
+            ttk.Label(row.tracks_container, text="Finding speakers…", foreground="#777").pack(anchor="w")
             return
-        if not tracks:
-            ttk.Label(
-                row.tracks_container, text="No separate audio tracks detected.", foreground="#777"
-            ).pack(anchor="w")
+        if len(tracks) <= 1:
+            # One combined recording: nothing to separate, no panel. Transcribe
+            # via the row's action button.
             return
 
         if job.selected_track_indices is None:
             job.selected_track_indices = {s.index for s in tracks}
-        show_checkboxes = len(tracks) > 1
+
+        if job.id in self._tracks_editing:
+            self._render_tracks_editor(job)
+        else:
+            self._render_speakers_view(job)
+
+    def _render_speakers_view(self, job: Job) -> None:
+        """Default view: one row per resulting speaker - just a preview button and
+        an editable name. No tracks, checkboxes, chips, or cleanup chatter; the
+        cleanup already happened. One quiet 'Edit tracks' link is the only way in
+        to the mechanics."""
+        row = self.rows.get(job.id)
+        tracks = job.tracks or []
+        selected = job.selected_track_indices or {s.index for s in tracks}
+        included = [s for s in tracks if s.index in selected]
         editable = job.status == "ready"
 
-        if show_checkboxes:
-            header = ttk.Label(row.tracks_container, foreground="#777")
-            header.pack(anchor="w", pady=(0, 3))
-            row.tracks_header = header
-            self._update_tracks_header(job)
-            holder = ttk.Frame(row.tracks_container)
-            holder.pack(fill="x")
-            row.shared_voice_holder = holder
-            self._render_shared_voice_banner(job)
+        for stream in included:
+            speaker_row = ttk.Frame(row.tracks_container)
+            speaker_row.pack(fill="x", pady=2)
+            self._bind_mousewheel(speaker_row)
+
+            is_playing = self._playing == (job.id, stream.index)
+            play_button = ttk.Button(
+                speaker_row, text=ICON_STOP if is_playing else ICON_START, width=2,
+                command=lambda s=stream: self._on_track_play(job, s),
+            )
+            play_button.configure(
+                state="normal" if (job.status == "ready" and TrackPlayer.available()) else "disabled"
+            )
+            play_button.pack(side="left", padx=(0, 8))
+            row.track_play_buttons[stream.index] = play_button
+
+            name_var = tk.StringVar(value=self._current_track_name(job, stream))
+            row.track_name_vars[stream.index] = name_var
+            name_entry = ttk.Combobox(
+                speaker_row, textvariable=name_var, width=20, values=self._recent_names()
+            )
+            name_entry.configure(state="normal" if editable else "disabled")
+            name_entry.pack(side="left")
+            name_entry.bind("<Return>", lambda _e, s=stream, v=name_var: self._commit_track_name(job, s, v))
+            name_entry.bind("<FocusOut>", lambda _e, s=stream, v=name_var: self._commit_track_name(job, s, v))
+            name_entry.bind("<<ComboboxSelected>>", lambda _e, s=stream, v=name_var: self._commit_track_name(job, s, v))
+            row.track_name_entries[stream.index] = name_entry
+
+        # The one escape hatch into the raw-track editor.
+        if editable:
+            hatch = ttk.Frame(row.tracks_container)
+            hatch.pack(anchor="w", pady=(8, 0))
+            ttk.Label(hatch, text="Not these speakers?", foreground=MUTED_FG, font=("", 11)).pack(side="left")
+            link = tk.Label(hatch, text="Edit tracks", fg=ACCENT_FG, cursor="hand2", font=("", 11))
+            link.pack(side="left", padx=(5, 0))
+            link.bind("<Button-1>", lambda _e: self._set_tracks_editing(job, True))
+
+    def _render_tracks_editor(self, job: Job) -> None:
+        """Advanced 'Edit tracks' view: the full raw-track editor (checkboxes,
+        names, waveforms, per-track detail, and the shared-voice plan card).
+        Reached only via 'Edit tracks'; '‹ Back to speakers' returns."""
+        row = self.rows.get(job.id)
+        tracks = job.tracks or []
+        show_checkboxes = True
+        editable = job.status == "ready"
+
+        back = tk.Label(row.tracks_container, text="‹ Back to speakers",
+                        fg=ACCENT_FG, cursor="hand2", font=("", 11))
+        back.pack(anchor="w", pady=(0, 6))
+        back.bind("<Button-1>", lambda _e: self._set_tracks_editing(job, False))
+
+        header = ttk.Label(row.tracks_container, foreground="#777")
+        header.pack(anchor="w", pady=(0, 3))
+        row.tracks_header = header
+        self._update_tracks_header(job)
+        holder = ttk.Frame(row.tracks_container)
+        holder.pack(fill="x")
+        row.shared_voice_holder = holder
+        self._render_shared_voice_banner(job)
 
         for stream in tracks:
             track_row = ttk.Frame(row.tracks_container)
@@ -1139,6 +1207,8 @@ class MainWindow:
         if name_entry is not None and str(name_entry.cget("state")) != "disabled":
             try:
                 name_entry.focus_set()
+                name_entry.select_range(0, "end")  # ready to type the name over the default
+                name_entry.icursor("end")
             except tk.TclError:
                 pass
 
@@ -1641,6 +1711,15 @@ class MainWindow:
                 width - 3, height - 1, text=label, anchor="se",
                 fill=WAVEFORM_TIME, font=("TkDefaultFont", 8),
             )
+
+    def _set_tracks_editing(self, job: Job, on: bool) -> None:
+        """Switch the panel between the simple speakers view and the raw-track
+        editor ('Edit tracks' / '‹ Back to speakers')."""
+        if on:
+            self._tracks_editing.add(job.id)
+        else:
+            self._tracks_editing.discard(job.id)
+        self._render_tracks_section(job)
 
     def _set_track_included(self, job: Job, stream_index: int, included: bool) -> None:
         """Include/exclude a track and re-render (used by the inline reason links)."""
