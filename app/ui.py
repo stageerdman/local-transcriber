@@ -1352,6 +1352,13 @@ class MainWindow:
                 second_channel = job.track_envelopes.get((stream.index, 1), [])
                 job.channel_pairs_identical[stream.index] = correlation(first_channel, second_channel) >= 0.98
 
+        # Note exact-duplicate tracks (near-identical loudness-over-time) for the
+        # "duplicate of X" reason text. This is NOT used to unselect tracks: when
+        # one loud voice dominates every track their envelopes all match, which
+        # would wrongly collapse a real 2-speaker call to 1. The authoritative
+        # keep/isolate/drop decision is the waveform-based shared-voice plan
+        # (_analyze_shared_voice_async → auto-apply), which correctly drops only
+        # the true duplicate and keeps each distinct speaker.
         job.duplicate_of = {}
         for i, stream in enumerate(job.tracks):
             for earlier in job.tracks[:i]:
@@ -1359,14 +1366,6 @@ class MainWindow:
                 if score >= 0.995:
                     job.duplicate_of[stream.index] = earlier.index
                     break
-
-        # Default to unchecking detected duplicates - but only as the
-        # initial suggestion. If the user already changed the selection by
-        # hand before this analysis finished, leave it alone.
-        if job.selected_track_indices == {s.index for s in job.tracks}:
-            job.selected_track_indices -= set(job.duplicate_of)
-            if not job.selected_track_indices:
-                job.selected_track_indices = {s.index for s in job.tracks}
 
         self._recompute_estimate(job)
         self._render_tracks_section(job)
