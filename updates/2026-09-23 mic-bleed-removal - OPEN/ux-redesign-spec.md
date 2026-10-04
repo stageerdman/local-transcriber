@@ -110,3 +110,31 @@ DEFERRED polish (low-risk, documented for a later pass):
 VERIFY GATE (per CLAUDE.md "run the actual app"): headless render + interaction
 smoke pass; a human run of `python -m app.main` on the Petr Sochůrek call is the
 final confirmation before closing.
+
+---
+
+## v2 — RADICAL simplification (2026-10-04, after "be Steve Jobs" feedback)
+
+The v1 redesign was still too noisy (chips + reason lines + card = text clutter)
+and a real bug collapsed 2 speakers to 1. Three ruthless-simplicity UX passes →
+rebuilt the default view from zero.
+
+SHIPPED:
+- **Bug fix (load-bearing):** the envelope-correlation `duplicate_of` check was
+  auto-unselecting tracks; when one loud voice dominates all tracks their
+  envelopes match, collapsing a 2-speaker call to 1 ("it only selects one track").
+  Removed the auto-unselect; the waveform-accurate shared-voice plan is now the
+  sole authority on what to drop (keeps both speakers).
+- **Default view = PEOPLE, not tracks:** one row per resulting speaker (preview
+  button + editable name, pre-filled from recent names). No header, no plan card,
+  no checkboxes, no chips, no reason lines, no waveforms, no cleanup text.
+  Cleanup is silent-correct.
+- **One escape hatch:** "Not these speakers? Edit tracks" → the full raw-track
+  editor (the entire v1 detailed view) in place, "‹ Back to speakers" to return.
+  All mechanics (language, noise, remove-voice, channels, include/exclude, the
+  plan card) live there, two clicks deep.
+- Single combined recording → no panel. Preview selects the name for instant
+  rename. No cleanup toggle (always on; reversible in the editor).
+
+Verified: headless render smoke across states (speakers view / editor / clean /
+reverted) + interaction harness + 112 tests. Final gate: human run of the app.
