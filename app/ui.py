@@ -1132,6 +1132,15 @@ class MainWindow:
         )
         self._set_play_button(job.id, stream.index, ICON_STOP, enabled=True)
         self._redraw_track(job, stream.index)
+        # Listen -> label: focus this track's name field so you can type who it
+        # is the moment you recognize the voice.
+        row = self.rows.get(job.id)
+        name_entry = row.track_name_entries.get(stream.index) if row else None
+        if name_entry is not None and str(name_entry.cget("state")) != "disabled":
+            try:
+                name_entry.focus_set()
+            except tk.TclError:
+                pass
 
     def _on_playback_finished(self, job_id: int, stream_index: int) -> None:
         if self._playing != (job_id, stream_index):
