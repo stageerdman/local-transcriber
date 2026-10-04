@@ -68,9 +68,13 @@ ICON_STOP = "■"
 ICON_RESET = "↻"
 ICON_BUSY = "…"
 
-# Amber used only for the shared-voice warning (banner + per-track marker);
-# distinct from the gray status text and meets contrast on the panel.
+# Amber used only for a genuine warning (unresolved shared voice / re-created
+# doubling); distinct from the gray status text and meets contrast on the panel.
 WARN_FG = "#8a6500"
+# Calm status palette for the people-first track panel.
+OK_FG = "#2b8a3e"      # "set up / handled" confirmations
+ACCENT_FG = "#4c6ef5"  # inline action links (Undo / Include)
+MUTED_FG = "#868e96"   # skipped / secondary text
 
 # Waveform / seek-bar colors (readable in both light and dark themes).
 WAVEFORM_UNPLAYED = "#9aa0a6"
@@ -152,7 +156,10 @@ class RowWidgets:
     track_canvases: dict[int, tk.Canvas] = field(default_factory=dict)
     # Per-track manual-control widgets (keyed by AudioStream.index).
     track_name_vars: dict[int, tk.StringVar] = field(default_factory=dict)
+    track_name_entries: dict[int, ttk.Entry] = field(default_factory=dict)
     track_status_labels: dict[int, ttk.Label] = field(default_factory=dict)
+    # Per-track "why" line under the row (reason + an inline include/undo link).
+    track_reason_frames: dict[int, ttk.Frame] = field(default_factory=dict)
     track_detail_frames: dict[int, ttk.Frame] = field(default_factory=dict)
     tracks_header: "ttk.Label | None" = None
     # Persistent holder for the shared-voice warning banner, so it can be
@@ -610,7 +617,9 @@ class MainWindow:
         row.track_canvases = {}
         row.track_play_buttons = {}
         row.track_name_vars = {}
+        row.track_name_entries = {}
         row.track_status_labels = {}
+        row.track_reason_frames = {}
         row.track_detail_frames = {}
         row.tracks_header = None
         row.shared_voice_holder = None
@@ -680,6 +689,7 @@ class MainWindow:
             name_entry.pack(side="left", padx=(2, 6))
             name_entry.bind("<Return>", lambda _e, s=stream, v=name_var: self._commit_track_name(job, s, v))
             name_entry.bind("<FocusOut>", lambda _e, s=stream, v=name_var: self._commit_track_name(job, s, v))
+            row.track_name_entries[stream.index] = name_entry
 
             # Detail-drawer disclosure (language / noise / remove-a-voice).
             detail_button = ttk.Button(
@@ -719,6 +729,14 @@ class MainWindow:
 
             if (job.id, stream.index) in self._track_details_open:
                 self._build_track_detail(job, stream)
+
+            # "Why" line under the row (reason + an Include/Undo link), populated
+            # by _update_track_status. Packed after this track_row so it sits
+            # directly beneath it.
+            reason = ttk.Frame(row.tracks_container)
+            reason.pack(fill="x", padx=(34, 0))
+            self._bind_mousewheel(reason)
+            row.track_reason_frames[stream.index] = reason
 
             self._update_track_status(job, stream)
 
@@ -878,26 +896,43 @@ class MainWindow:
         self._update_track_status(job, stream)
         self._refresh_shared_voice(job)
 
-    def _track_status_summary(self, job: Job, stream: AudioStream) -> str:
-        parts: list[str] = []
-        if (job.track_languages or {}).get(stream.index) is not None or (
-            job.track_languages and stream.index in job.track_languages
-        ):
-            value = job.track_languages[stream.index]
-            parts.append(LANGUAGE_VALUE_TO_LABEL.get(value, "Auto"))
-        if (job.track_denoise or {}).get(stream.index, self._noise_default()):
-            parts.append("Clean")
-        refs = (job.track_subtractions or {}).get(stream.index, [])
-        if refs:
-            parts.append("− " + ", ".join(self._track_name_by_index(job, r) for r in refs))
-        dup = (job.duplicate_of or {}).get(stream.index)
+    # -- per-track state model (people-first) ---------------------------------
+    # One enum drives the row's chip, reason line, dimming, and the header count.
+    # States: "clean" (its own speaker), "isolated" (another voice removed),
+    # "conflict" (still shares a voice with another INCLUDED track - the only
+    # amber state), "skipped_dup" (a duplicate copy, not transcribed),
+    # "excluded" (the user turned it off).
+    def _track_state(self, job: Job, stream: AudioStream) -> str:
+        idx = stream.index
+        selected = job.selected_track_indices or {s.index for s in (job.tracks or [])}
+        if idx not in selected:
+            return "skipped_dup" if self._skip_twin_name(job, stream) else "excluded"
+        if self._shared_voice_partner_name(job, stream):
+            return "conflict"
+        if (job.track_subtractions or {}).get(idx):
+            return "isolated"
+        return "clean"
+
+    def _skip_twin_name(self, job: Job, stream: AudioStream) -> str | None:
+        """Name of the included track this (skipped) one duplicates, if any -
+        the reason it was skipped. From exact-copy detection first, then a
+        shared-voice 'duplicate' pairing."""
+        idx = stream.index
+        dup = (job.duplicate_of or {}).get(idx)
         if dup is not None:
-            parts.append(f"~{self._track_name_by_index(job, dup)}")
-        return " · ".join(parts)
+            return self._track_name_by_index(job, dup)
+        selected = job.selected_track_indices or set()
+        for w in (job.shared_voice_warnings or []):
+            if w.kind != "duplicate":
+                continue
+            other = w.component_index if idx == w.mix_index else (w.mix_index if idx == w.component_index else None)
+            if other is not None and other in selected:
+                return self._track_name_by_index(job, other)
+        return None
 
     def _shared_voice_partner_name(self, job: Job, stream: AudioStream) -> str | None:
-        """If this track still shares a voice with another selected track, the
-        other track's name (for the ⚠ marker); else None."""
+        """If this track still shares a voice with another INCLUDED track (the
+        voice would be written twice), the bleeding voice's name; else None."""
         for w in self._unhandled_shared_voice(job):
             if stream.index == w.mix_index:
                 return self._track_name_by_index(job, w.component_index)
@@ -905,26 +940,102 @@ class MainWindow:
                 return self._track_name_by_index(job, w.mix_index)
         return None
 
+    # (text, color) chip shown at the right of a track row. "clean" shows nothing
+    # - the default needs no badge; chips mark only the exceptions.
+    def _track_chip(self, state: str) -> tuple[str, str]:
+        return {
+            "clean": ("", MUTED_FG),
+            "isolated": ("◐ Cleaned up", ACCENT_FG),
+            "skipped_dup": ("⊘ Skipped", MUTED_FG),
+            "excluded": ("○ Off", MUTED_FG),
+            "conflict": ("⚠ Same voice", WARN_FG),
+        }.get(state, ("", MUTED_FG))
+
+    def _track_reason(self, job: Job, stream: AudioStream, state: str) -> tuple[str, str]:
+        """(reason sentence, color) for the line under a row. Empty for a plain
+        clean track - nothing needs explaining."""
+        name = self._current_track_name(job, stream)
+        if state == "isolated":
+            refs = (job.track_subtractions or {}).get(stream.index, [])
+            removed = " and ".join(self._track_name_by_index(job, r) for r in refs)
+            return (f"{removed}'s voice removed, so this is only {name}.", MUTED_FG)
+        if state == "skipped_dup":
+            twin = self._skip_twin_name(job, stream) or "another track"
+            return (f"Same audio as {twin} — already covered, so it's skipped.", MUTED_FG)
+        if state == "excluded":
+            return ("You turned this track off.", MUTED_FG)
+        if state == "conflict":
+            partner = self._shared_voice_partner_name(job, stream)
+            return (f"{partner}'s voice is also here — {partner} would be written twice.", WARN_FG)
+        return ("", MUTED_FG)
+
     def _update_track_status(self, job: Job, stream: AudioStream) -> None:
+        """Refresh a row's chip, reason line, and dimming from its state."""
         row = self.rows.get(job.id)
         if row is None:
             return
+        state = self._track_state(job, stream)
         label = row.track_status_labels.get(stream.index)
-        if label is None:
+        if label is not None:
+            text, color = self._track_chip(state)
+            label.configure(text=text, foreground=color)
+        # Dim a skipped/excluded track's name so it reads as "not a speaker".
+        entry = row.track_name_entries.get(stream.index)
+        if entry is not None:
+            dimmed = state in ("skipped_dup", "excluded")
+            try:
+                entry.configure(foreground=MUTED_FG if dimmed else "")
+            except tk.TclError:
+                pass
+        self._render_track_reason(job, stream, state)
+
+    def _render_track_reason(self, job: Job, stream: AudioStream, state: str) -> None:
+        row = self.rows.get(job.id)
+        if row is None:
             return
-        partner = self._shared_voice_partner_name(job, stream)
-        if partner is not None:
-            label.configure(text=f"⚠ same voice as {partner}", foreground=WARN_FG)
-        else:
-            label.configure(text=self._track_status_summary(job, stream), foreground="#868e96")
+        holder = row.track_reason_frames.get(stream.index)
+        if holder is None:
+            return
+        for child in holder.winfo_children():
+            child.destroy()
+        text, color = self._track_reason(job, stream, state)
+        if not text:
+            return
+        ttk.Label(holder, text=text, foreground=color, font=("", 11),
+                  wraplength=430, justify="left").pack(side="left")
+        editable = job.status == "ready"
+        link = None
+        if state in ("skipped_dup", "excluded"):
+            link = ("Include anyway", lambda: self._set_track_included(job, stream.index, True))
+        elif state == "isolated":
+            link = ("Undo", lambda: self._clear_track_subtraction(job, stream))
+        if link and editable:
+            lbl, cmd = link
+            action = tk.Label(holder, text=lbl, fg=ACCENT_FG, cursor="hand2", font=("", 11))
+            action.pack(side="left", padx=(6, 0))
+            action.bind("<Button-1>", lambda _e, c=cmd: c())
 
     def _update_tracks_header(self, job: Job) -> None:
         row = self.rows.get(job.id)
         if row is None or row.tracks_header is None:
             return
-        n = len(job.tracks or [])
-        k = len(job.selected_track_indices or set())
-        row.tracks_header.configure(text=f"Tracks — {n} detected, {k} included")
+        row.tracks_header.configure(text=self._people_summary_text(job))
+
+    def _people_summary_text(self, job: Job) -> str:
+        """People-first header: how many speakers you'll get, not a track count.
+        Directly answers 'it only kept one track' by stating the result up front."""
+        tracks = job.tracks or []
+        selected = job.selected_track_indices or set()
+        kept = sum(1 for s in tracks if s.index in selected)
+        skipped = len(tracks) - kept
+        if kept == 0:
+            return "No speakers selected"
+        who = "speaker" if kept == 1 else "speakers"
+        text = f"{kept} {who} will be transcribed"
+        if skipped:
+            t = "track" if skipped == 1 else "tracks"
+            text += f" · {skipped} {t} skipped"
+        return text
 
     def _channel_mode_label(self, job: Job, stream: AudioStream) -> str:
         channel_index = (job.selected_channel_by_track or {}).get(stream.index)
@@ -1461,6 +1572,30 @@ class MainWindow:
                 width - 3, height - 1, text=label, anchor="se",
                 fill=WAVEFORM_TIME, font=("TkDefaultFont", 8),
             )
+
+    def _set_track_included(self, job: Job, stream_index: int, included: bool) -> None:
+        """Include/exclude a track and re-render (used by the inline reason links)."""
+        if job.status != "ready":
+            return
+        if job.selected_track_indices is None:
+            job.selected_track_indices = {s.index for s in job.tracks or []}
+        if included:
+            job.selected_track_indices.add(stream_index)
+        else:
+            if len(job.selected_track_indices) <= 1:
+                return
+            job.selected_track_indices.discard(stream_index)
+        self._recompute_estimate(job)
+        self._render_tracks_section(job)
+
+    def _clear_track_subtraction(self, job: Job, stream: AudioStream) -> None:
+        """Undo an auto-applied isolation on one track (stop removing a voice)."""
+        if job.status != "ready":
+            return
+        if job.track_subtractions:
+            job.track_subtractions.pop(stream.index, None)
+        self._recompute_estimate(job)
+        self._render_tracks_section(job)
 
     def _on_track_toggle(self, job: Job, stream_index: int, var: tk.BooleanVar) -> None:
         if job.selected_track_indices is None:
