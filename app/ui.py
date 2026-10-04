@@ -1384,12 +1384,29 @@ class MainWindow:
 
     def _on_shared_voice_analyzed(self, job: Job, warnings: list) -> None:
         job.shared_voice_warnings = warnings
-        self._render_tracks_section(job)
+        # App auto-picks the speakers by default: if a voice is on more than one
+        # track, apply the keep/isolate/skip plan now so the panel opens already
+        # set up ("you'll get 2 speakers"). The user can still revert to every
+        # track, or adjust per row. We don't re-apply once the user has fixed or
+        # explicitly reverted.
+        if (
+            warnings
+            and not job.shared_voice_fixed
+            and not job.shared_voice_dismissed
+            and self._unhandled_shared_voice(job)
+        ):
+            self._apply_shared_voice_fix(job, auto=True)
+        else:
+            self._render_tracks_section(job)
 
     def _unhandled_shared_voice(self, job: Job):
         """Shared-voice warnings that still apply given the current selection and
-        subtractions - i.e. would still double a speaker if transcribed now."""
-        if not job.shared_voice_warnings or job.shared_voice_dismissed:
+        subtractions - i.e. would still double a speaker if transcribed now.
+
+        Not suppressed by `shared_voice_dismissed`: if the user reverted to every
+        track, the doubling is real and must be shown (amber). `dismissed` only
+        stops detection from silently re-applying the plan."""
+        if not job.shared_voice_warnings:
             return []
         selected = job.selected_track_indices
         if selected is None:
@@ -1413,20 +1430,23 @@ class MainWindow:
         )
         return track_separation.resolve_shared_voice(selected, job.shared_voice_warnings or [])
 
-    def _shared_voice_plan_text(self, job: Job) -> str:
-        """Plain-language description of what the fix will do, by speaker name."""
-        subs, drop = self._shared_voice_fix_plan(job)
-        clauses: list[str] = []
-        kept_components = {c for refs in subs.values() for c in refs}
-        for comp in sorted(kept_components):
-            clauses.append(f'keep "{self._track_name_by_index(job, comp)}" as its own speaker')
-        for mix, refs in subs.items():
-            names = ", ".join(self._track_name_by_index(job, r) for r in refs)
-            clauses.append(f'remove {names} from "{self._track_name_by_index(job, mix)}"')
-        if drop:
-            names = ", ".join(self._track_name_by_index(job, d) for d in sorted(drop))
-            clauses.append(f"skip {names}")
-        return "Fix: " + ", ".join(clauses) + "." if clauses else ""
+    def _plan_speaker_summary(self, job: Job) -> str:
+        """"You'll get 2 speakers: Client · Salesperson" - the result, by name."""
+        selected = job.selected_track_indices or {s.index for s in (job.tracks or [])}
+        names = [self._current_track_name(job, s) for s in (job.tracks or []) if s.index in selected]
+        if not names:
+            return ""
+        who = "speaker" if len(names) == 1 else "speakers"
+        return f"You'll get {len(names)} {who}:  " + " · ".join(names)
+
+    def _doubling_title(self, job: Job, warnings) -> str:
+        """Amber headline. Names the bled voice only when it's a single, clear
+        'contains' case; otherwise stays generic rather than listing a confusing
+        pile of track names."""
+        bled = sorted({w.component_index for w in warnings if w.kind == "contains"})
+        if len(bled) == 1:
+            return f'⚠ "{self._track_name_by_index(job, bled[0])}" would be written twice'
+        return "⚠ The same voice would be written twice"
 
     def _refresh_shared_voice(self, job: Job) -> None:
         """Cheap re-evaluation (no detector re-run) after the user changes the
@@ -1436,55 +1456,76 @@ class MainWindow:
             self._update_track_status(job, stream)
 
     def _render_shared_voice_banner(self, job: Job) -> None:
+        """The plan card above the track rows. Three cases:
+          - handled (the app set up each person once): calm GREEN confirmation.
+          - a voice would still be written twice (user reverted / left it on):
+            AMBER warning with a one-click way back to the handled plan.
+          - nothing shared: no card at all.
+        """
         row = self.rows.get(job.id)
         if row is None or row.shared_voice_holder is None:
             return
         container = row.shared_voice_holder
         for child in container.winfo_children():
             child.destroy()
+
+        editable = job.status == "ready"
         unhandled = self._unhandled_shared_voice(job)
-        if not unhandled:
-            if job.shared_voice_fixed:
-                frame = ttk.Frame(container)
-                frame.pack(fill="x", pady=(0, 4))
-                ttk.Label(
-                    frame, text="✓ Fixed — the same voice won't be written twice.",
-                    foreground="#2b8a3e",
-                ).pack(side="left")
-                if self._shared_voice_undo.get(job.id) is not None:
-                    ttk.Button(frame, text="Undo", width=6,
-                               command=lambda: self._undo_shared_voice_fix(job)).pack(side="left", padx=(8, 0))
+
+        if not unhandled and job.shared_voice_fixed:
+            frame = ttk.Frame(container)
+            frame.pack(fill="x", pady=(0, 6))
+            ttk.Label(
+                frame, text="✓ Set up to transcribe each person once",
+                foreground=OK_FG, font=("", 11, "bold"), wraplength=460, justify="left",
+            ).pack(anchor="w")
+            summary = self._plan_speaker_summary(job)
+            if summary:
+                ttk.Label(frame, text=summary, foreground="#555",
+                          wraplength=460, justify="left").pack(anchor="w", pady=(1, 2))
+            if editable:
+                link = tk.Label(frame, text="Transcribe every track instead",
+                                fg=ACCENT_FG, cursor="hand2", font=("", 11))
+                link.pack(anchor="w")
+                link.bind("<Button-1>", lambda _e: self._revert_to_all_tracks(job))
             return
 
-        # Name the shared voice(s) = the clean component tracks in the warnings.
-        names = sorted({self._track_name_by_index(job, w.component_index) for w in unhandled})
-        who = " and ".join(f'"{n}"' for n in names)
-        frame = ttk.Frame(container)
-        frame.pack(fill="x", pady=(0, 5))
-        ttk.Label(
-            frame,
-            text=f"⚠ The same voice is on two tracks — {who} would be written twice.",
-            foreground=WARN_FG, font=("", 11, "bold"), wraplength=460, justify="left",
-        ).pack(anchor="w")
-        plan = self._shared_voice_plan_text(job)
-        if plan:
-            ttk.Label(frame, text=plan, foreground="#555", wraplength=460, justify="left").pack(
-                anchor="w", pady=(1, 3)
-            )
-        buttons = ttk.Frame(frame)
-        buttons.pack(anchor="w")
-        editable = job.status == "ready"
-        fix_btn = ttk.Button(buttons, text="Fix automatically",
-                             command=lambda: self._apply_shared_voice_fix(job))
-        fix_btn.configure(state="normal" if editable else "disabled")
-        fix_btn.pack(side="left")
-        ttk.Button(buttons, text="Keep as is",
-                   command=lambda: self._dismiss_shared_voice(job)).pack(side="left", padx=(6, 0))
+        if unhandled:
+            frame = ttk.Frame(container)
+            frame.pack(fill="x", pady=(0, 6))
+            ttk.Label(
+                frame,
+                text=self._doubling_title(job, unhandled),
+                foreground=WARN_FG, font=("", 11, "bold"), wraplength=460, justify="left",
+            ).pack(anchor="w")
+            ttk.Label(
+                frame,
+                text="The same voice is on more than one included track.",
+                foreground="#555", wraplength=460, justify="left",
+            ).pack(anchor="w", pady=(1, 2))
+            if editable:
+                link = tk.Label(frame, text="Set up to transcribe each person once",
+                                fg=ACCENT_FG, cursor="hand2", font=("", 11))
+                link.pack(anchor="w")
+                link.bind("<Button-1>", lambda _e: self._reapply_shared_voice_fix(job))
 
-    def _apply_shared_voice_fix(self, job: Job) -> None:
-        """One-click fix: apply the suggested subtractions and drop redundant
-        tracks, then re-render. Snapshotted so it's one-click reversible, and
-        also adjustable via the per-track controls it leaves in place."""
+    def _revert_to_all_tracks(self, job: Job) -> None:
+        """User chose to transcribe every track (undo the auto plan). Marked so
+        detection won't silently re-apply it."""
+        self._undo_shared_voice_fix(job)
+        job.shared_voice_dismissed = True
+        self._render_tracks_section(job)
+
+    def _reapply_shared_voice_fix(self, job: Job) -> None:
+        """Go back to the handled plan after the user had reverted."""
+        job.shared_voice_dismissed = False
+        self._apply_shared_voice_fix(job)
+
+    def _apply_shared_voice_fix(self, job: Job, auto: bool = False) -> None:
+        """Apply the suggested subtractions and drop redundant tracks, then
+        re-render. Snapshotted so it's one-click reversible, and also adjustable
+        via the per-track controls it leaves in place. `auto=True` when applied
+        automatically on detection (vs. a user click) - behaviour is identical."""
         if job.selected_track_indices is None:
             job.selected_track_indices = {s.index for s in (job.tracks or [])}
         # Snapshot for Undo (before mutating).
