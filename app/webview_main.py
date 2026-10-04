@@ -28,6 +28,7 @@ def main() -> int:
         min_size=(780, 540),
     )
     bridge.set_window(window)
+    window.events.closed += bridge.shutdown  # stop the engine subprocess on quit
     webview.start()
     return 0
 
