@@ -5,3 +5,4 @@ faster-whisper>=1.0.0   # used only for its bundled Silero VAD - src/transcripti
 # local LLM dependency - see src/polish.py.
 pytest>=8.0.0
 tkinterdnd2>=0.4.2
+pywebview>=6.2    # native WebKit window for the new web UI (app/webview_main.py)
