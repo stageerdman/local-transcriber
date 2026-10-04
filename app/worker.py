@@ -28,6 +28,37 @@ SENTINEL = object()
 
 ENGINE_POLL_SECONDS = 0.2
 
+# Representative segment (35% into the call) used to detect which tracks share a
+# voice - the same window the UI analyzes. 90s is long enough for both speakers
+# to appear.
+SHARED_VOICE_SEGMENT_S = 90.0
+
+
+def _track_rms(track_pcm) -> float:
+    import numpy as np
+
+    return float(np.sqrt(np.mean(track_pcm * track_pcm))) if len(track_pcm) else 0.0
+
+
+def _segment_energy(track_pcm, start: float, end: float, track_rms: float) -> float | None:
+    """How prominent a segment is on its own track: segment RMS / track RMS.
+
+    RELATIVE, not absolute, so it is comparable ACROSS tracks of different gain.
+    A speaker is prominent on their own mic (ratio around/above 1) and faint
+    where they only bleed into another track (well below 1) - even when the
+    bleed's absolute level rivals a quiet clean track's. This is the signal the
+    echo filter uses to keep the real copy and drop the bleed. Measured on the
+    raw pre-subtraction PCM. Returns None if the span is empty (can't rank it)."""
+    import numpy as np
+
+    rate = track_separation.ANALYSIS_RATE
+    s0 = max(0, int(start * rate))
+    s1 = min(len(track_pcm), int(end * rate))
+    if s1 <= s0 or track_rms <= 0:
+        return None
+    window = track_pcm[s0:s1]
+    return float(np.sqrt(np.mean(window * window)) / track_rms)
+
 
 class _StopRequested(Exception):
     pass
@@ -201,6 +232,15 @@ class TranscriptionWorker(threading.Thread):
             temp_dir = Path(tempfile.mkdtemp(prefix="local-transcriber-"))
 
             if container_has_multiple_streams:
+                # Auto-apply speaker separation unless the user configured it
+                # themselves. One voice landing on several tracks is the mic-bleed
+                # doubling case; this subtracts/drops redundant tracks by default
+                # so a plain Start is clean, no manual UI step. (The text-level
+                # echo filter after merge is the backstop for whatever survives.)
+                if len(selected_streams) > 1:
+                    selected_streams = self._auto_apply_separation(
+                        job, selected_streams, job.audio_duration_seconds
+                    )
                 # Each selected track is transcribed as its own pass, so
                 # total work scales with how many tracks were picked, not
                 # the container's total track count.
@@ -208,6 +248,13 @@ class TranscriptionWorker(threading.Thread):
                     job.estimated_seconds *= len(selected_streams)
                 labeled_segments = self._transcribe_multi_track(job, streams, selected_streams, temp_dir)
                 blocks = dialogue.merge_segments_into_blocks(labeled_segments)
+                # Mic-bleed safety net: a voice that leaked onto a second track
+                # gets transcribed twice, under two speakers. Drop the quiet echo
+                # turn (keeping the louder original) before rendering, then re-flag
+                # interruptions since a removed echo may have falsely marked one.
+                if len(selected_streams) > 1:
+                    blocks = dialogue.drop_cross_speaker_echoes(blocks)
+                    dialogue.flag_interruptions(blocks)
                 raw_transcript_text = dialogue.render_blocks_markdown(blocks)
                 # Polish one turn at a time, then re-render so speaker labels and
                 # timestamps (added by render) are never exposed to the LLM.
@@ -296,6 +343,58 @@ class TranscriptionWorker(threading.Thread):
                 shutil.rmtree(temp_dir, ignore_errors=True)
             self._emit(job)
 
+    def _auto_apply_separation(
+        self, job: Job, selected_streams: list[AudioStream], duration: float | None
+    ) -> list[AudioStream]:
+        """Apply the validated shared-voice plan (isolate / keep / drop) by default.
+
+        Returns the streams still to transcribe (dropped ones removed) and sets
+        `job.track_subtractions` for the mixes to isolate. No-op when the user
+        already configured subtractions (their choice wins), when detection finds
+        nothing to fix, or on any detection failure - the post-merge echo filter
+        is the backstop either way. Never drops the last remaining track.
+        """
+        if job.track_subtractions:  # user override (or UI "Fix automatically")
+            return selected_streams
+
+        warnings = job.shared_voice_warnings
+        if warnings is None:
+            warnings = self._detect_shared_voice(job.source_path, selected_streams, duration)
+        selected_indices = [s.index for s in selected_streams]
+        subtractions, drop = track_separation.resolve_shared_voice(selected_indices, warnings)
+        if not subtractions and not drop:
+            return selected_streams
+
+        job.status = "separating speakers"
+        job.status_detail = None
+        self._emit(job)
+        job.track_subtractions = subtractions
+        kept = [s for s in selected_streams if s.index not in drop]
+        return kept or selected_streams
+
+    def _detect_shared_voice(
+        self, source: Path, streams: list[AudioStream], duration: float | None
+    ) -> list:
+        """Decode a representative window of each stream and detect shared voices.
+        Best-effort: returns [] on any failure (auto-separation then no-ops)."""
+        try:
+            start = max(0.0, (duration * 0.35) if duration else 0.0)
+            if duration and start + SHARED_VOICE_SEGMENT_S > duration:
+                start = max(0.0, duration - SHARED_VOICE_SEGMENT_S)
+            signals = [
+                track_separation.TrackSignal(
+                    index=s.index,
+                    name="",
+                    samples=track_separation.decode_track_pcm(
+                        source, s.index, start_s=start, duration_s=SHARED_VOICE_SEGMENT_S
+                    ),
+                )
+                for s in streams
+            ]
+            return track_separation.detect_shared_voice(signals)
+        except Exception:  # noqa: BLE001 - detection is best-effort; backstop covers us
+            return []
+
     def _transcribe_multi_track(
         self,
         job: Job,
@@ -364,8 +463,13 @@ class TranscriptionWorker(threading.Thread):
 
             language = languages.get(stream.index) or job.language
             segments = self._transcribe_via_engine(job, track_wav, on_progress, language=language)
+            track_pcm = pcm[stream.index]
+            track_rms = _track_rms(track_pcm)
             labeled_segments.extend(
-                dialogue.Segment(speaker=name, start=seg.start, end=seg.end, text=seg.text)
+                dialogue.Segment(
+                    speaker=name, start=seg.start, end=seg.end, text=seg.text,
+                    energy=_segment_energy(track_pcm, seg.start, seg.end, track_rms),
+                )
                 for seg in segments
             )
 
