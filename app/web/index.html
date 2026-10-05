@@ -259,6 +259,11 @@
   .speaker input:focus{outline:none;border-bottom-color:var(--accent)}
   .speaker .mini{width:66px;height:22px;display:flex;align-items:center;gap:2px;flex:none;opacity:.8}
   .speaker .mini i{flex:1;border-radius:2px;align-self:center}
+  .speaker.excluded{opacity:.42}
+  .speaker .det-x{font-size:11.5px;color:var(--muted);flex:none;padding:4px 6px}
+  .speaker .det-x:hover{color:var(--accent)}
+  .aside-line{margin-top:12px;padding-top:10px;border-top:1px dashed var(--line);display:flex;gap:10px;flex-wrap:wrap}
+  .aside-add{font-size:12.5px;color:var(--accent);font-weight:600;padding:4px 2px}
   .detect .foot{display:flex;align-items:center;margin-top:22px;gap:12px}
   .detect .edit{font-size:12.5px;color:var(--muted)}
   .detect .edit a{color:var(--accent);font-weight:600}
@@ -506,18 +511,7 @@
             <h2>Two people on this call</h2>
             <p class="lead">Name them, or just go.</p>
 
-            <div class="speaker">
-              <button class="play" aria-label="Preview"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></button>
-              <span class="av" style="background:var(--spk-a)">K</span>
-              <input value="Klient" aria-label="First speaker name">
-              <span class="mini" data-seed="7" style="--c:var(--spk-a)"></span>
-            </div>
-            <div class="speaker">
-              <button class="play" aria-label="Preview"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></button>
-              <span class="av" style="background:var(--spk-b)">O</span>
-              <input value="Obchodník" aria-label="Second speaker name">
-              <span class="mini" data-seed="4" style="--c:var(--spk-b)"></span>
-            </div>
+            <div id="detect-people"></div>
 
             <div class="qstep">
               <span class="qlabel">Quality</span>
@@ -788,9 +782,9 @@
   // ---- one source of truth for audio: nothing plays in two places; everything stops on navigation ----
   function resetPreviewIcons(){document.querySelectorAll('[data-prev="1"]').forEach(b=>{b.dataset.prev='0';const s=b.querySelector('svg');if(s)s.innerHTML='<path d="M8 5v14l11-7z"/>';});}
   function stopAllAudio(){const A=api();if(A)A.stop_audio();stopLoop();setPlayIcon(false);resetPreviewIcons();}
-  function preview(btn,source,audio){const A=api();if(!A||!source)return;
+  function preview(btn,source,audio,start){const A=api();if(!A||!source)return;
     const was=btn&&btn.dataset.prev==='1'; stopAllAudio(); if(was)return;
-    A.play_source(source,0,audio||0);
+    A.play_source(source,start||0,audio||0);
     if(btn){btn.dataset.prev='1';const s=btn.querySelector('svg');if(s)s.innerHTML='<path d="M7 5h4v14H7zM13 5h4v14h-4z"/>';}}
   window.preview=preview;
   const _show2=window.show; window.show=function(id,el){stopAllAudio();_show2(id,el);};
@@ -814,16 +808,32 @@
   };
   function renderDetect(call){
     currentDetect=call; currentSource=call.source||null;
-    const n=call.people.length;
+    if(!call.setaside)call.setaside=[];
+    const active=call.people.filter(p=>!p.exclude);
+    const n=active.length;
     const h=document.querySelector('#seg-detect h2');
     if(h)h.textContent=n===1?'One person on this call':(n===2?'Two people on this call':`${n} people on this call`);
-    const rows=document.querySelectorAll('#seg-detect .speaker');
-    rows.forEach((row,i)=>{const p=call.people[i];
-      if(p){row.style.display='';
-        const inp=row.querySelector('input');if(inp){inp.value=p.name;inp.oninput=()=>{p.name=inp.value;};}
-        const pb=row.querySelector('.play');if(pb)pb.onclick=()=>preview(pb,call.source,p.audio||0);}
-      else row.style.display='none';});
+    const dp=document.getElementById('detect-people'); if(!dp)return;
+    dp.innerHTML=call.people.map((p,i)=>`
+      <div class="speaker${p.exclude?' excluded':''}" data-i="${i}">
+        <button class="play" aria-label="Preview"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></button>
+        <span class="av" style="background:var(--spk-${p.lane||'a'})">${esc((p.name||'?').trim().charAt(0).toUpperCase()||'?')}</span>
+        <input value="${esc(p.name).replace(/"/g,'&quot;')}" oninput="detName(${i},this.value)" aria-label="Speaker name">
+        <span class="mini" style="--c:var(--spk-${p.lane||'a'})">${miniBars(7+i*3,22)}</span>
+        <button class="det-x" title="Don’t transcribe" onclick="detExclude(${i})">${p.exclude?'add back':'remove'}</button>
+      </div>`).join('')
+      + (call.setaside.length?`<div class="aside-line">${call.setaside.map((a,j)=>`<button class="aside-add" onclick="detAdd(${j})">+ Add ${esc(a.name)}</button>`).join('')}</div>`:'');
+    dp.querySelectorAll('.speaker').forEach((row,i)=>{const p=call.people[i];
+      const pb=row.querySelector('.play'); if(pb)pb.onclick=()=>preview(pb,call.source,p.audio||0,p.start||0);});
   }
+  window.detName=function(i,v){const p=currentDetect&&currentDetect.people[i];if(p)p.name=v;};
+  window.detExclude=function(i){const p=currentDetect&&currentDetect.people[i];if(!p)return;
+    if(!p.exclude && currentDetect.people.filter(x=>!x.exclude).length<=1)return;
+    p.exclude=!p.exclude; stopAllAudio(); renderDetect(currentDetect);};
+  window.detAdd=function(j){const a=currentDetect&&currentDetect.setaside[j];if(!a)return;
+    const lane=currentDetect.people.length%2===0?'a':'b';
+    currentDetect.people.push({index:a.index,audio:a.audio,name:a.name,lane,ghost:null,start:a.start});
+    currentDetect.setaside.splice(j,1); stopAllAudio(); renderDetect(currentDetect);};
 
   // The Fix-speakers overlay, rendered from the real detected people.
   function renderFix(){
@@ -842,7 +852,7 @@
         <div class="p-verbs"><button onclick="fixExclude(${i})">${p.exclude?'Transcribe this person':'Don’t transcribe this person'}</button></div>
       </div>`).join('');
     body.querySelectorAll('.person').forEach((row,i)=>{const p=call.people[i];const pb=row.querySelector('.p-play');
-      if(pb)pb.onclick=()=>preview(pb,call.source,p.audio||0);});
+      if(pb)pb.onclick=()=>preview(pb,call.source,p.audio||0,p.start||0);});
     buildRibs();
   }
   window.fixName=function(i,v){ if(currentDetect&&currentDetect.people[i])currentDetect.people[i].name=v; };
@@ -864,13 +874,13 @@
   window.startProc=function(){
     const A=api();
     if(A&&currentDetect){
-      const names={},exclude=[],keep_voice=[];
-      currentDetect.people.forEach(p=>{ if(p.exclude){exclude.push(p.index);return;} names[p.index]=p.name; if(p.ghost&&p.keepGhost)keep_voice.push(p.index); });
+      const names={},speakers=[],keep_voice=[];
+      currentDetect.people.forEach(p=>{ if(p.exclude)return; speakers.push(p.index); names[p.index]=p.name; if(p.ghost&&p.keepGhost)keep_voice.push(p.index); });
       const q=document.querySelector('#seg-detect .qpick.sel');
       const quality=(q&&q.textContent.trim()==='Faster')?'Fast':'Best';
       const tidy=!!document.querySelector('.qstep .sw.on');
       A.set_settings({quality,tidy});
-      A.transcribe(currentDetect.id,{names,exclude,keep_voice,quality,tidy});
+      A.transcribe(currentDetect.id,{names,speakers,keep_voice,quality,tidy});
       if(!calls.find(c=>c.id===currentDetect.id))
         calls.unshift({id:currentDetect.id,name:currentDetect.name,status:'working',prog:0,seed:7});
       renderCalls();renderCards();show('home');

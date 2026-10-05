@@ -218,23 +218,49 @@ class Bridge:
             job.audio_duration_seconds = probe_duration_seconds(path)
         except Exception:  # noqa: BLE001 - surface a usable error to the UI
             streams = []
-        people = self._detect_people(job, streams)
+        people, set_aside = self._detect_people(job, streams)
         self._pending[job.id] = job
         return {
             "id": job.id, "name": path.stem, "source": str(path),
             "dur": _fmt_duration(job.audio_duration_seconds),
-            "people": people, "status": "ready",
+            "people": people, "setaside": set_aside, "status": "ready",
         }
 
-    def _detect_people(self, job: Job, streams: list) -> list[dict]:
-        """The resulting speakers after auto-separation (keep clean + isolate mix,
-        drop duplicates) - what the worker will actually transcribe."""
-        default_names = dict(zip((s.index for s in streams), track_speaker_names(streams)))
-        pos_by_index = {s.index: i for i, s in enumerate(streams)}  # ffplay audio position
+    def _first_speech(self, source: Path, stream_index: int) -> float:
+        """Seconds to the first real speech in a track (so previews skip long quiet
+        intros). Scans the first ~5 minutes; 0.0 if nothing stands out."""
+        try:
+            import numpy as np
+            rate = track_separation.ANALYSIS_RATE
+            pcm = track_separation.decode_track_pcm(source, stream_index, start_s=0.0, duration_s=300.0)
+            if len(pcm) == 0:
+                return 0.0
+            win = int(0.5 * rate)
+            ref = float(np.sqrt(np.mean(pcm * pcm))) + 1e-9
+            for s in range(0, len(pcm) - win, win):
+                if float(np.sqrt(np.mean(pcm[s:s + win] ** 2))) > 0.25 * ref:
+                    return max(0.0, s / rate - 0.3)
+        except Exception:  # noqa: BLE001
+            pass
+        return 0.0
+
+    def _name_for(self, stream, seq: int) -> str:
+        """Embedded track title if present, else a sequential 'Speaker N' (so the
+        displayed roster never has confusing gaps like 'Speaker 1, Speaker 3')."""
+        return stream.title if getattr(stream, "title", None) else f"Speaker {seq}"
+
+    def _detect_people(self, job: Job, streams: list) -> tuple[list[dict], list[dict]]:
+        """(people, set_aside). `people` are the resulting speakers after auto-
+        separation (keep clean + isolate mix); `set_aside` are tracks dropped as
+        duplicates, offered so the user can add one back if detection was wrong."""
+        pos_by_index = {s.index: i for i, s in enumerate(streams)}
         if len(streams) <= 1:
-            idx = streams[0].index if streams else 0
-            return [{"index": idx, "audio": pos_by_index.get(idx, 0),
-                     "name": default_names.get(idx, "Speaker"), "lane": "a", "ghost": None}]
+            s = streams[0] if streams else None
+            idx = s.index if s else 0
+            person = {"index": idx, "audio": pos_by_index.get(idx, 0),
+                      "name": self._name_for(s, 1) if s else "Speaker 1",
+                      "lane": "a", "ghost": None, "start": self._first_speech(job.source_path, idx) if s else 0.0}
+            return ([person], [])
         warnings = []
         try:
             start = max(0.0, (job.audio_duration_seconds or 0) * 0.35)
@@ -251,24 +277,27 @@ class Bridge:
             warnings = track_separation.detect_shared_voice(signals)
         except Exception:  # noqa: BLE001 - detection is best-effort
             warnings = []
-        selected = [s.index for s in streams]
-        subs, drop = track_separation.resolve_shared_voice(selected, warnings)
+        subs, drop = track_separation.resolve_shared_voice([s.index for s in streams], warnings)
         job.track_subtractions = subs or None
         kept = [s for s in streams if s.index not in drop] or streams
-        # Pin the plan so the worker transcribes exactly these speakers (keep +
-        # isolate), not every raw track. The worker respects a preset selection
-        # and subtraction; the text backstop still runs underneath.
+        dropped = [s for s in streams if s.index in drop and s not in kept]
         job.selected_track_indices = {s.index for s in kept}
+        kept_name = {s.index: self._name_for(s, n + 1) for n, s in enumerate(kept)}
         people = []
         for n, s in enumerate(kept):
             refs = (subs or {}).get(s.index, [])
-            ghost = default_names.get(refs[0]) if refs else None
+            ghost = kept_name.get(refs[0]) if refs else None  # the voice removed from this mix
             people.append({
-                "index": s.index, "audio": pos_by_index.get(s.index, n),
-                "name": default_names.get(s.index, f"Speaker {n+1}"),
+                "index": s.index, "audio": pos_by_index.get(s.index, n), "name": kept_name[s.index],
                 "lane": "a" if n % 2 == 0 else "b", "ghost": ghost,
+                "start": self._first_speech(job.source_path, s.index),
             })
-        return people
+        set_aside = [{
+            "index": s.index, "audio": pos_by_index[s.index],
+            "name": s.title if getattr(s, "title", None) else "Another recording",
+            "start": self._first_speech(job.source_path, s.index),
+        } for s in dropped]
+        return (people, set_aside)
 
     # -- transcribe -----------------------------------------------------------
     def transcribe(self, job_id: str, options: dict | None = None) -> dict:
@@ -283,12 +312,9 @@ class Bridge:
             job.model = QUALITY_TO_MODEL.get(options["quality"], job.model)
         if "tidy" in options:
             job.polish = bool(options["tidy"])
-        exclude = {int(x) for x in options.get("exclude", [])}
-        if exclude:
-            selected = set(job.selected_track_indices or {s.index for s in (job.tracks or [])})
-            selected -= exclude
-            if selected:  # never exclude everyone
-                job.selected_track_indices = selected
+        speakers = options.get("speakers")  # final set of track indices to transcribe
+        if speakers:
+            job.selected_track_indices = {int(x) for x in speakers}
         for mix in options.get("keep_voice", []):  # user chose to keep a bled-in voice
             if job.track_subtractions:
                 job.track_subtractions.pop(int(mix), None)
