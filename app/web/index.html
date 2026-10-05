@@ -455,7 +455,7 @@
           <span class="t-title">Petr Sochůrek</span>
           <div class="t-actions">
             <button class="tbtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4-4"/></svg>Search</button>
-            <button class="tbtn primary"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14"/></svg>Export</button>
+            <button class="tbtn primary" onclick="exportCall()"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14"/></svg>Export</button>
           </div>
         </div>
         <div class="t-sub">
@@ -745,7 +745,18 @@
 
   // ===== engine bridge (pywebview). Falls back to the mock demo when absent. =====
   function api(){return (window.pywebview&&window.pywebview.api)||null}
-  let currentDetect=null;
+  let currentDetect=null, currentSource=null, currentOutput=null, curSecs=0, isPlaying=false;
+  function tsToSecs(ts){const p=(ts||'').trim().split(':').map(Number);
+    if(p.length===3)return (p[0]*3600+p[1]*60+p[2])||0; if(p.length===2)return (p[0]*60+p[1])||0; return 0;}
+  function setPlayIcon(on){isPlaying=on;const pi=document.getElementById('picon');
+    if(pi)pi.innerHTML=on?'<path d="M7 5h4v14H7zM13 5h4v14h-4z"/>':'<path d="M8 5v14l11-7z"/>';}
+  const _seek=window.seek;
+  window.seek=function(el){ if(_seek)_seek(el); curSecs=tsToSecs(el.textContent);
+    const A=api(); if(A&&currentSource){A.play_source(currentSource,curSecs,0);setPlayIcon(true);} };
+  window.togglePlay=function(){ const A=api();
+    if(A&&currentSource){ if(isPlaying){A.stop_audio();setPlayIcon(false);} else {A.play_source(currentSource,curSecs,0);setPlayIcon(true);} return; }
+    isPlaying=!isPlaying; setPlayIcon(isPlaying); };
+  window.exportCall=function(){ const A=api(); if(A&&currentOutput)A.reveal(currentOutput); };
 
   window.newCall=function(){
     const A=api();
@@ -759,19 +770,22 @@
     });
   };
   function renderDetect(call){
-    currentDetect=call;
+    currentDetect=call; currentSource=call.source||null;
     const n=call.people.length;
     const h=document.querySelector('#seg-detect h2');
     if(h)h.textContent=n===1?'One person on this call':(n===2?'Two people on this call':`${n} people on this call`);
     const rows=document.querySelectorAll('#seg-detect .speaker');
     rows.forEach((row,i)=>{const p=call.people[i];
-      if(p){row.style.display='';const inp=row.querySelector('input');if(inp)inp.value=p.name;}
+      if(p){row.style.display='';
+        const inp=row.querySelector('input');if(inp)inp.value=p.name;
+        const pb=row.querySelector('.play');if(pb)pb.onclick=()=>{const A=api();if(A&&call.source)A.play_source(call.source,0,p.audio||0);};}
       else row.style.display='none';});
   }
 
   window.openCall=function(i){
     const c=calls[i]; if(!c||c.status!=='done')return;
     calls.forEach(x=>x.active=false); c.active=true; renderCalls();
+    currentSource=c.source||null; currentOutput=c.output||null; curSecs=0; setPlayIcon(false);
     const A=api();
     if(c.transcript){renderTranscript({name:c.name,dur:c.dur,turns:c.transcript.turns});show('transcript');return;}
     if(A&&c.output){A.open_call(c.output).then(d=>{if(d&&!d.error)renderTranscript({name:d.name,dur:c.dur,turns:d.turns});show('transcript');});return;}

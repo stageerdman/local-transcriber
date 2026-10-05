@@ -28,6 +28,7 @@ from app.worker import SENTINEL, TranscriptionWorker
 from src import catalog, history_db
 from src.audio_tracks import safe_probe_audio_streams, track_speaker_names
 from src.duration import probe_duration_seconds
+from src.playback import TrackPlayer
 from src import track_separation
 
 SETTINGS_PATH = Path.home() / "Library" / "Application Support" / "LocalTranscriber" / "settings.json"
@@ -108,6 +109,7 @@ class Bridge:
         self.worker = TranscriptionWorker(self.job_queue, self.event_queue, self.db)
         self.worker.start()
         self._pending: dict[str, Job] = {}  # detected-but-not-yet-transcribed jobs
+        self._player = TrackPlayer()
         threading.Thread(target=self._drain_events, daemon=True).start()
 
     def set_window(self, window) -> None:
@@ -146,7 +148,7 @@ class Bridge:
                 "id": f"h{r.id}", "name": Path(r.source_path).stem,
                 "when": _relative(r.finished_at or r.started_at),
                 "dur": _fmt_duration(r.audio_duration_seconds),
-                "output": r.output_path, "status": "done",
+                "output": r.output_path, "source": r.source_path, "status": "done",
             })
         return calls
 
@@ -187,7 +189,7 @@ class Bridge:
         people = self._detect_people(job, streams)
         self._pending[job.id] = job
         return {
-            "id": job.id, "name": path.stem,
+            "id": job.id, "name": path.stem, "source": str(path),
             "dur": _fmt_duration(job.audio_duration_seconds),
             "people": people, "status": "ready",
         }
@@ -196,9 +198,11 @@ class Bridge:
         """The resulting speakers after auto-separation (keep clean + isolate mix,
         drop duplicates) - what the worker will actually transcribe."""
         default_names = dict(zip((s.index for s in streams), track_speaker_names(streams)))
+        pos_by_index = {s.index: i for i, s in enumerate(streams)}  # ffplay audio position
         if len(streams) <= 1:
             idx = streams[0].index if streams else 0
-            return [{"index": idx, "name": default_names.get(idx, "Speaker"), "lane": "a", "ghost": None}]
+            return [{"index": idx, "audio": pos_by_index.get(idx, 0),
+                     "name": default_names.get(idx, "Speaker"), "lane": "a", "ghost": None}]
         warnings = []
         try:
             start = max(0.0, (job.audio_duration_seconds or 0) * 0.35)
@@ -228,7 +232,8 @@ class Bridge:
             refs = (subs or {}).get(s.index, [])
             ghost = default_names.get(refs[0]) if refs else None
             people.append({
-                "index": s.index, "name": default_names.get(s.index, f"Speaker {n+1}"),
+                "index": s.index, "audio": pos_by_index.get(s.index, n),
+                "name": default_names.get(s.index, f"Speaker {n+1}"),
                 "lane": "a" if n % 2 == 0 else "b", "ghost": ghost,
             })
         return people
@@ -266,6 +271,7 @@ class Bridge:
             "id": job.id, "status": job.status, "progress": progress,
             "detail": job.status_detail or job.status,
         }
+        payload["source"] = str(job.source_path)
         if job.status == "done" and job.output_path:
             payload["output"] = str(job.output_path)
             try:
@@ -281,6 +287,31 @@ class Bridge:
         if self._window is None:
             return
         self._window.evaluate_js(f"window.appEvent && window.appEvent({event!r}, {json.dumps(payload)})")
+
+    # -- playback + export ---------------------------------------------------
+    def play_source(self, source: str, seconds: float = 0.0, audio_index: int = 0) -> dict:
+        """Play one audio stream of a call from `seconds` (preview / read-along).
+        Only one thing is audible at a time."""
+        if not TrackPlayer.available():
+            return {"error": "ffplay not found — install ffmpeg (brew install ffmpeg)."}
+        try:
+            self._player.play(Path(source), audio_index=int(audio_index), start_seconds=float(seconds))
+            return {"ok": True}
+        except Exception as e:  # noqa: BLE001
+            return {"error": str(e)}
+
+    def stop_audio(self) -> dict:
+        self._player.stop()
+        return {"ok": True}
+
+    def reveal(self, path: str) -> dict:
+        """Reveal the written transcript in Finder."""
+        import subprocess
+        p = Path(path)
+        if not p.exists():
+            return {"error": "That file is missing."}
+        subprocess.Popen(["open", "-R", str(p)])
+        return {"ok": True}
 
     def ping(self) -> str:
         return "ok"
