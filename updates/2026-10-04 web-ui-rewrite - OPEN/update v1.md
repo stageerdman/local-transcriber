@@ -55,3 +55,59 @@ wired to Python through a `Bridge` (js_api). Fully offline, no browser.
   here, PyPI is not). Added to `requirements.txt`.
 - The front-end JS currently uses mock data (sample call, fake queue) so the shell
   is demoable before the bridge is wired; Phase 2+ swaps mocks for bridge calls.
+
+---
+
+## ▶ RESUME HERE (paused 2026-10-05)
+
+The Tkinter UI has been replaced by a native pywebview app and is the default
+entry. Core loop works end to end (verified headless + via the user's interactive
+runs); several rounds of real-run bug reports have been fixed.
+
+**Run:** `.venv/bin/python -m app.main`  (old Tkinter still at `app.main_tk`)
+
+### Architecture (recap)
+- `app/web/index.html` — single-file front-end (HTML/CSS/JS), from the approved
+  prototype (`scratchpad/transcriber-redesign.html`). Falls back to a mock demo
+  when opened without the bridge.
+- `app/webview_main.py` — opens the WebKit window, wires `Bridge`, sets the dock
+  icon, attaches the OS drag-drop handler, `debug=True` (devtools on).
+- `app/bridge.py` — js_api over the engine: get/set_settings, recent_calls,
+  open_call, pick_files+detect, transcribe (via `TranscriptionWorker`),
+  play_source/stop_audio/playback_position, reveal, handle_drop. Emits `job` and
+  `dropped` events to the UI. Reuses all of `src/` unchanged.
+
+### DONE
+- Native shell; real recent calls + settings; drop/pick → detect speakers →
+  "Who's on this call"; transcribe for real with live queue progress; open a
+  finished transcript as the two-voice script.
+- Playback: play/pause, click-a-line-to-play, live progress bar + speaker label +
+  current-line highlight + auto-scroll; previews start at first SUSTAINED speech.
+- Audio lifecycle: one source at a time; stops on navigation / open+close Fix;
+  killed on quit (shutdown + atexit) — no more orphaned ffplay.
+- Export (reveal .md in Finder); full-window drag-and-drop; brand app icon;
+  sequential speaker names; Fix speakers editing surface (waveform per person,
+  rename, Don't-transcribe, Remove-a-voice picker, add back a set-aside track) →
+  drives the worker via speakers + subtractions. Cutover: `app.main` = new UI.
+
+### PENDING / NEXT (pick up here)
+1. **Full real-app verify**: a complete GUI transcribe of a real call confirming
+   queue→progress→finished transcript. (User has been running interactively;
+   no end-to-end "transcribe to completion" confirmation captured yet.)
+2. **Fix speakers from a FINISHED transcript**: the legend "Fix speakers…" opens
+   the editor but a post-transcribe structural change needs a NON-DESTRUCTIVE
+   RE-RUN (keep old transcript until the new one is ready). Only the pre-transcribe
+   path is wired today. `renderFix` uses `currentDetect` (the last detected call);
+   from a finished transcript it may be empty.
+3. **Per-person language**: the `CS` token in the UI cycles but is NOT sent to the
+   worker; only the global default language (settings) is applied. Wire
+   `track_languages` through transcribe if wanted.
+4. **Multiple files**: pick/drop returns all paths but `openDetect` only handles
+   `paths[0]`; batch (detect+queue each) is not wired.
+5. **Release hygiene**: turn off `debug=True` in `app/webview_main.py`; then
+   formally retire `app/main_tk.py` + the Tkinter `app/ui.py` once confident.
+6. Dead CSS from the prototype (settings/choice/.p-adjust/.ribbon etc.) can be
+   pruned from `app/web/index.html`.
+
+All code committed on `main`. If GitHub was unreachable at pause time, push when
+back online.

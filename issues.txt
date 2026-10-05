@@ -24,3 +24,17 @@
 - [ ] Parakeet chunking is fixed at 120s; smaller chunks would make the
       progress bar update more often (and are more memory-safe) at some extra
       overlap recompute. A knob to revisit if the bar's jumps feel too coarse.
+
+- [ ] Web-UI rewrite (updates/2026-10-04 web-ui-rewrite - OPEN/): new pywebview
+      app is the default (`python -m app.main`; Tkinter fallback `app.main_tk`).
+      Core loop works; remaining before closing the update:
+        * Full real-app GUI transcribe-to-completion not yet confirmed end-to-end.
+        * "Fix speakers" from a FINISHED transcript needs a non-destructive re-run
+          (only pre-transcribe editing is wired).
+        * Per-person language token in the UI is not passed to the worker (global
+          language only).
+        * Multiple dropped/picked files: only the first is detected/transcribed
+          (no batch queue yet).
+        * debug=True (devtools) still on in app/webview_main.py; retire Tkinter
+          (app/main_tk.py, app/ui.py) once confident; prune dead prototype CSS.
+      See the update's "▶ RESUME HERE" for the full picture.
