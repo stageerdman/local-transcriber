@@ -1,6 +1,6 @@
 # Web-UI rewrite — update v1 (OPEN)
 
-**Status: OPEN — building (Phases 1–4 shipped 2026-10-04; pending real-app verify)**
+**Status: OPEN — building (Phases 1–4 + playback/export/cutover shipped; Fix-speakers override + drag-drop remain; pending full real-app verify)**
 
 ## Goal
 Replace the Tkinter UI with a from-scratch, beautiful native front-end — the
