@@ -112,11 +112,17 @@ class Bridge:
         self._pending: dict[str, Job] = {}  # detected-but-not-yet-transcribed jobs
         self._player = TrackPlayer()
         threading.Thread(target=self._drain_events, daemon=True).start()
+        import atexit
+        atexit.register(self.shutdown)  # never leave ffplay / the engine running
 
     def set_window(self, window) -> None:
         self._window = window
 
     def shutdown(self) -> None:
+        try:
+            self._player.stop()  # kill any ffplay preview so audio never outlives the app
+        except Exception:
+            pass
         self.job_queue.put(SENTINEL)
 
     # -- settings -------------------------------------------------------------
@@ -277,6 +283,15 @@ class Bridge:
             job.model = QUALITY_TO_MODEL.get(options["quality"], job.model)
         if "tidy" in options:
             job.polish = bool(options["tidy"])
+        exclude = {int(x) for x in options.get("exclude", [])}
+        if exclude:
+            selected = set(job.selected_track_indices or {s.index for s in (job.tracks or [])})
+            selected -= exclude
+            if selected:  # never exclude everyone
+                job.selected_track_indices = selected
+        for mix in options.get("keep_voice", []):  # user chose to keep a bled-in voice
+            if job.track_subtractions:
+                job.track_subtractions.pop(int(mix), None)
         job.status = "queued"
         self.job_queue.put(job)
         self._emit("job", {"id": job.id, "status": "queued", "progress": 0})
