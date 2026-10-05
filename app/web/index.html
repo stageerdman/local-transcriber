@@ -216,8 +216,9 @@
   .turn.playing .say{color:var(--ink)}
 
   /* player */
-  .player{position:absolute;left:50%;bottom:26px;transform:translateX(-50%);
-    width:min(620px,calc(100% - 64px));background:var(--surface);border:1px solid var(--line-strong);
+  /* pinned to the viewport bottom (within the main column), so it stays put while the transcript scrolls */
+  .player{position:fixed;left:272px;right:0;bottom:22px;margin:0 auto;
+    width:min(620px,calc(100vw - 336px));background:var(--surface);border:1px solid var(--line-strong);
     border-radius:999px;box-shadow:var(--shadow-lift);display:flex;align-items:center;gap:14px;padding:9px 16px 9px 10px;z-index:8}
   .pplay{width:40px;height:40px;border-radius:50%;background:var(--accent);color:var(--accent-ink);
     display:grid;place-items:center;flex:none;transition:transform .12s}
@@ -401,7 +402,7 @@
   .status-line .chg{margin-left:auto;color:var(--accent);cursor:pointer;font-weight:600}
 
   @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
-  @media (max-width:760px){.app{grid-template-columns:1fr}.rail{display:none}}
+  @media (max-width:760px){.app{grid-template-columns:1fr}.rail{display:none}.player{left:0;width:min(620px,calc(100vw - 48px))}}
 </style>
 </head>
 <body>
@@ -603,8 +604,11 @@
   ].map(t=>({lane:t[0],ts:t[1],text:t[2],speaker:({a:'Klient',b:'Obchodník'})[t[0]]}));
 
   function esc(s){return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+  let curTurns=[], curTotalSecs=0;
   function renderTranscript(data){
     const turns=data.turns||[];
+    curTurns=turns.map(t=>({lane:t.lane,secs:tsToSecs(t.ts)}));
+    curTotalSecs=tsToSecs(data.dur)||(curTurns.length?curTurns[curTurns.length-1].secs+30:0);
     const laneName={};turns.forEach(t=>{if(t.lane&&t.speaker)laneName[t.lane]=t.speaker});
     const nameA=laneName.a||'Speaker 1',nameB=laneName.b||'Speaker 2';
     const title=document.querySelector('.t-title'); if(title)title.textContent=data.name||'Untitled';
@@ -746,28 +750,57 @@
   // ===== engine bridge (pywebview). Falls back to the mock demo when absent. =====
   function api(){return (window.pywebview&&window.pywebview.api)||null}
   let currentDetect=null, currentSource=null, currentOutput=null, curSecs=0, isPlaying=false;
+  let posTimer=null, lastUserScroll=0, lastHi=-1;
   function tsToSecs(ts){const p=(ts||'').trim().split(':').map(Number);
     if(p.length===3)return (p[0]*3600+p[1]*60+p[2])||0; if(p.length===2)return (p[0]*60+p[1])||0; return 0;}
+  function fmtSecs(s){s=Math.max(0,Math.round(s));const h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;
+    const p2=n=>String(n).padStart(2,'0');return h?`${h}:${p2(m)}:${p2(x)}`:`${m}:${p2(x)}`;}
   function setPlayIcon(on){isPlaying=on;const pi=document.getElementById('picon');
     if(pi)pi.innerHTML=on?'<path d="M7 5h4v14H7zM13 5h4v14h-4z"/>':'<path d="M8 5v14l11-7z"/>';}
+  function setFill(frac){const f=document.querySelector('.player .fill');if(f)f.style.right=(100-Math.max(0,Math.min(1,frac))*100)+'%';}
+  function highlightAt(secs){
+    let idx=-1;for(let i=0;i<curTurns.length;i++){if(curTurns[i].secs<=secs)idx=i;else break;}
+    if(idx<0||idx===lastHi)return; lastHi=idx;
+    const turns=document.querySelectorAll('#script .turn');turns.forEach(t=>t.classList.remove('playing'));
+    const el=turns[idx];if(!el)return;el.classList.add('playing');
+    const spk=el.querySelector('.spk'),p=document.getElementById('pspk');
+    if(spk&&p){p.textContent=spk.textContent.trim();p.style.color=el.classList.contains('turn--a')?'var(--spk-a)':'var(--spk-b)';}
+    if(Date.now()-lastUserScroll>4000)el.scrollIntoView({behavior:'smooth',block:'center'});
+  }
+  function startLoop(){ stopLoop(); posTimer=setInterval(()=>{
+    const A=api();if(!A){stopLoop();return;}
+    A.playback_position().then(st=>{
+      if(!st||!st.playing){setPlayIcon(false);stopLoop();return;}
+      const s=st.seconds||0; setFill(curTotalSecs?s/curTotalSecs:0);
+      const pt=document.getElementById('ptime');if(pt)pt.textContent=fmtSecs(s);
+      highlightAt(s);
+    }).catch(()=>{});
+  },300); }
+  function stopLoop(){ if(posTimer){clearInterval(posTimer);posTimer=null;} }
   const _seek=window.seek;
-  window.seek=function(el){ if(_seek)_seek(el); curSecs=tsToSecs(el.textContent);
-    const A=api(); if(A&&currentSource){A.play_source(currentSource,curSecs,0);setPlayIcon(true);} };
+  window.seek=function(el){ if(_seek)_seek(el); curSecs=tsToSecs(el.textContent); lastHi=-1;
+    const A=api(); if(A&&currentSource){A.play_source(currentSource,curSecs,0);setPlayIcon(true);startLoop();} };
   window.togglePlay=function(){ const A=api();
-    if(A&&currentSource){ if(isPlaying){A.stop_audio();setPlayIcon(false);} else {A.play_source(currentSource,curSecs,0);setPlayIcon(true);} return; }
+    if(A&&currentSource){ if(isPlaying){A.stop_audio();setPlayIcon(false);stopLoop();} else {A.play_source(currentSource,curSecs,0);setPlayIcon(true);lastHi=-1;startLoop();} return; }
     isPlaying=!isPlaying; setPlayIcon(isPlaying); };
   window.exportCall=function(){ const A=api(); if(A&&currentOutput)A.reveal(currentOutput); };
+  (function(){const v=document.getElementById('view-transcript'); if(v)v.addEventListener('scroll',()=>{lastUserScroll=Date.now();});})();
 
   window.newCall=function(){
     const A=api();
     if(!A){show('new');return;}
-    A.add_files().then(list=>{
-      if(!list||!list.length)return;
-      renderDetect(list[0]);
+    A.pick_files().then(paths=>{
+      if(!paths||!paths.length)return;
+      show('new');
       document.getElementById('seg-detect').classList.add('show');
       document.getElementById('seg-proc').classList.remove('show');
-      show('new');
-    });
+      const h=document.querySelector('#seg-detect h2'); if(h)h.textContent='Finding speakers…';
+      document.querySelectorAll('#seg-detect .speaker').forEach(r=>r.style.display='none');
+      A.detect(paths[0]).then(call=>{
+        if(!call||call.error){ if(h)h.textContent='Couldn’t read that file'; return; }
+        renderDetect(call);
+      }).catch(e=>{console.error('detect',e); if(h)h.textContent='Couldn’t read that file';});
+    }).catch(e=>console.error('pick_files',e));
   };
   function renderDetect(call){
     currentDetect=call; currentSource=call.source||null;
@@ -786,6 +819,7 @@
     const c=calls[i]; if(!c||c.status!=='done')return;
     calls.forEach(x=>x.active=false); c.active=true; renderCalls();
     currentSource=c.source||null; currentOutput=c.output||null; curSecs=0; setPlayIcon(false);
+    stopLoop(); lastHi=-1; setFill(0); const _pt=document.getElementById('ptime'); if(_pt)_pt.textContent='0:00';
     const A=api();
     if(c.transcript){renderTranscript({name:c.name,dur:c.dur,turns:c.transcript.turns});show('transcript');return;}
     if(A&&c.output){A.open_call(c.output).then(d=>{if(d&&!d.error)renderTranscript({name:d.name,dur:c.dur,turns:d.turns});show('transcript');});return;}

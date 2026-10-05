@@ -162,15 +162,27 @@ class Bridge:
         return data
 
     # -- add + detect ---------------------------------------------------------
-    def add_files(self) -> list[dict]:
+    def pick_files(self) -> list[str]:
+        """Open the native picker and return chosen paths (fast; no analysis)."""
         if self._window is None:
             return []
-        picked = self._window.create_file_dialog(
-            webview.OPEN_DIALOG, allow_multiple=True, file_types=_MEDIA_TYPES
-        )
-        if not picked:
-            return []
-        return [self._prepare(Path(p)) for p in picked]
+        try:
+            picked = self._window.create_file_dialog(
+                webview.OPEN_DIALOG, allow_multiple=True, file_types=_MEDIA_TYPES
+            )
+        except Exception:  # some macOS versions reject the type filter - fall back
+            picked = self._window.create_file_dialog(webview.OPEN_DIALOG, allow_multiple=True)
+        return [str(p) for p in (picked or [])]
+
+    def detect(self, path: str) -> dict:
+        """Probe + detect speakers for one file (slow; call after pick_files)."""
+        try:
+            return self._prepare(Path(path))
+        except Exception as e:  # noqa: BLE001 - surface to the UI
+            return {"error": str(e), "name": Path(path).stem}
+
+    def add_files(self) -> list[dict]:  # kept for back-compat
+        return [self.detect(p) for p in self.pick_files()]
 
     def _prepare(self, path: Path) -> dict:
         """Probe a file and detect who's on it, WITHOUT transcribing yet."""
@@ -303,6 +315,11 @@ class Bridge:
     def stop_audio(self) -> dict:
         self._player.stop()
         return {"ok": True}
+
+    def playback_position(self) -> dict:
+        """Where playback is now (seconds) and whether it's still going - polled
+        by the UI to drive the progress bar, line highlight, and auto-scroll."""
+        return {"seconds": self._player.position() or 0.0, "playing": self._player.is_playing()}
 
     def reveal(self, path: str) -> dict:
         """Reveal the written transcript in Finder."""

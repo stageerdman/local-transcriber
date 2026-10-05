@@ -29,7 +29,8 @@ def main() -> int:
     )
     bridge.set_window(window)
     window.events.closed += bridge.shutdown  # stop the engine subprocess on quit
-    webview.start()
+    # debug=True enables right-click → Inspect Element (web console) for diagnosing.
+    webview.start(debug=True)
     return 0
 
 
