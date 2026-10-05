@@ -15,6 +15,18 @@ import webview
 from app.bridge import Bridge
 
 WEB_DIR = Path(__file__).resolve().parent / "web"
+LOGO = Path(__file__).resolve().parent.parent / "logo.png"
+
+
+def _set_dock_icon() -> None:
+    """Set the macOS dock icon to the brand logo for this run (best-effort)."""
+    try:
+        from AppKit import NSApplication, NSImage
+        img = NSImage.alloc().initByReferencingFile_(str(LOGO))
+        if img and img.isValid():
+            NSApplication.sharedApplication().setApplicationIconImage_(img)
+    except Exception:
+        pass
 
 
 def main() -> int:
@@ -29,6 +41,7 @@ def main() -> int:
     )
     bridge.set_window(window)
     window.events.closed += bridge.shutdown  # stop the engine subprocess on quit
+    window.events.shown += _set_dock_icon
     # debug=True enables right-click → Inspect Element (web console) for diagnosing.
     webview.start(debug=True)
     return 0

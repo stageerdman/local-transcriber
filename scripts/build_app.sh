@@ -29,7 +29,8 @@ INSTALL_DIR="${APP_INSTALL_DIR:-/Applications}"
 DIST_DIR="$(mktemp -d)"
 trap 'rm -rf "$DIST_DIR"' EXIT
 BUNDLE_PATH="$DIST_DIR/$APP_NAME.app"
-LOGO_PATH="$PROJECT_DIR/logo.jpg"
+LOGO_PATH="$PROJECT_DIR/logo.png"
+[ -f "$LOGO_PATH" ] || LOGO_PATH="$PROJECT_DIR/logo.jpg"
 
 if [ ! -f "$PROJECT_DIR/VERSION" ]; then
   echo "ERROR: VERSION file not found in $PROJECT_DIR" >&2
