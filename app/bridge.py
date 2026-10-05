@@ -38,6 +38,7 @@ QUALITY_TO_MODEL = {"Best": catalog.DEFAULT_MODEL, "Fast": FAST_MODEL}
 MODEL_TO_QUALITY = {catalog.DEFAULT_MODEL: "Best", FAST_MODEL: "Fast"}
 
 _MEDIA_TYPES = ("Audio / video (*.mp3;*.wav;*.m4a;*.aac;*.flac;*.mp4;*.mov;*.m4v;*.mkv;*.webm)",)
+_MEDIA_EXT = (".mp3", ".wav", ".m4a", ".aac", ".flac", ".mp4", ".mov", ".m4v", ".mkv", ".webm")
 
 
 def _load_settings() -> dict:
@@ -173,6 +174,19 @@ class Bridge:
         except Exception:  # some macOS versions reject the type filter - fall back
             picked = self._window.create_file_dialog(webview.OPEN_DIALOG, allow_multiple=True)
         return [str(p) for p in (picked or [])]
+
+    def handle_drop(self, event) -> None:
+        """DOM 'drop' handler (attached to <body> in webview_main). pywebview puts
+        the real filesystem path on each file as `pywebviewFullPath`; forward the
+        media ones to the UI, which runs the same detect flow as the picker."""
+        try:
+            files = ((event or {}).get("dataTransfer") or {}).get("files") or []
+            paths = [f.get("pywebviewFullPath") for f in files
+                     if f.get("pywebviewFullPath", "").lower().endswith(_MEDIA_EXT)]
+            if paths:
+                self._emit("dropped", {"paths": paths})
+        except Exception:  # noqa: BLE001
+            pass
 
     def detect(self, path: str) -> dict:
         """Probe + detect speakers for one file (slow; call after pick_files)."""

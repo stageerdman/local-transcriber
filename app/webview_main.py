@@ -42,6 +42,13 @@ def main() -> int:
     bridge.set_window(window)
     window.events.closed += bridge.shutdown  # stop the engine subprocess on quit
     window.events.shown += _set_dock_icon
+
+    def _attach_dnd() -> None:
+        try:
+            window.dom.body.events.drop += bridge.handle_drop  # OS file drops → paths
+        except Exception:
+            pass
+    window.events.loaded += _attach_dnd
     # debug=True enables right-click → Inspect Element (web console) for diagnosing.
     webview.start(debug=True)
     return 0

@@ -229,6 +229,17 @@
   .ptrack .fill{position:absolute;inset:0 62% 0 0;background:linear-gradient(90deg,var(--spk-b),var(--spk-a));border-radius:3px}
   .pspk{font-size:12px;font-weight:600;color:var(--spk-a);flex:none}
 
+  /* full-window drag-and-drop overlay */
+  .dropzone{position:fixed;inset:0;z-index:60;display:none;align-items:center;justify-content:center;
+    background:color-mix(in srgb,var(--ground) 72%,transparent);backdrop-filter:blur(6px)}
+  .dropzone.show{display:flex;animation:fade .15s ease}
+  .dropzone .dz-card{border:2.5px dashed var(--accent);border-radius:24px;padding:56px 84px;text-align:center;
+    background:var(--surface);box-shadow:var(--shadow-lift);pointer-events:none}
+  .dropzone .wave{display:flex;align-items:center;justify-content:center;gap:5px;height:52px;margin-bottom:18px}
+  .dropzone .wave i{width:5px;border-radius:3px;background:linear-gradient(var(--spk-a),var(--spk-b));opacity:.6}
+  .dropzone h2{font-family:var(--font-display);font-size:24px;font-weight:600;letter-spacing:-.01em}
+  .dropzone p{font-size:13.5px;color:var(--muted);margin-top:6px}
+
   /* ---- New call / detect ---- */
   .nc{max-width:560px;margin:0 auto;padding:70px 32px}
   .nc .drop{margin-top:0}
@@ -580,12 +591,21 @@
   </main>
 </div>
 
+<div class="dropzone" id="dropzone">
+  <div class="dz-card">
+    <div class="wave" aria-hidden="true"></div>
+    <h2>Drop to transcribe</h2>
+    <p>Audio or video · stays on your device</p>
+  </div>
+</div>
+
 <script>
 (function(){
   // decorative waveform bars
   const rnd=(s)=>{let x=Math.sin(s)*10000;return x-Math.floor(x)};
   function fillWave(el,n,min,max,seed){let h="";for(let i=0;i<n;i++){const v=min+(max-min)*(0.35+0.65*rnd(seed+i*1.7));h+=`<i style="height:${v}px${el.style.getPropertyValue('--c')?';background:var(--c)':''}"></i>`}el.innerHTML=h}
   document.querySelectorAll('.drop .wave').forEach(w=>fillWave(w,34,12,40,1));
+  document.querySelectorAll('.dropzone .wave').forEach(w=>fillWave(w,30,14,50,5));
   document.querySelectorAll('.proc .bars').forEach(w=>fillWave(w,40,14,56,3));
   document.querySelectorAll('.speaker .mini').forEach(w=>{w.innerHTML='';const n=22;for(let i=0;i<n;i++){const v=4+18*(0.3+0.7*rnd((+w.dataset.seed)+i*2.1));w.innerHTML+=`<i style="height:${v}px;background:var(--c)"></i>`}});
 
@@ -771,7 +791,7 @@
     const A=api();if(!A){stopLoop();return;}
     A.playback_position().then(st=>{
       if(!st||!st.playing){setPlayIcon(false);stopLoop();return;}
-      const s=st.seconds||0; setFill(curTotalSecs?s/curTotalSecs:0);
+      const s=st.seconds||0; curSecs=s; setFill(curTotalSecs?s/curTotalSecs:0);
       const pt=document.getElementById('ptime');if(pt)pt.textContent=fmtSecs(s);
       highlightAt(s);
     }).catch(()=>{});
@@ -786,21 +806,22 @@
   window.exportCall=function(){ const A=api(); if(A&&currentOutput)A.reveal(currentOutput); };
   (function(){const v=document.getElementById('view-transcript'); if(v)v.addEventListener('scroll',()=>{lastUserScroll=Date.now();});})();
 
+  function openDetect(paths){
+    const A=api(); if(!A||!paths||!paths.length)return;
+    show('new');
+    document.getElementById('seg-detect').classList.add('show');
+    document.getElementById('seg-proc').classList.remove('show');
+    const h=document.querySelector('#seg-detect h2'); if(h)h.textContent='Finding speakers…';
+    document.querySelectorAll('#seg-detect .speaker').forEach(r=>r.style.display='none');
+    A.detect(paths[0]).then(call=>{
+      if(!call||call.error){ if(h)h.textContent='Couldn’t read that file'; return; }
+      renderDetect(call);
+    }).catch(e=>{console.error('detect',e); if(h)h.textContent='Couldn’t read that file';});
+  }
   window.newCall=function(){
     const A=api();
     if(!A){show('new');return;}
-    A.pick_files().then(paths=>{
-      if(!paths||!paths.length)return;
-      show('new');
-      document.getElementById('seg-detect').classList.add('show');
-      document.getElementById('seg-proc').classList.remove('show');
-      const h=document.querySelector('#seg-detect h2'); if(h)h.textContent='Finding speakers…';
-      document.querySelectorAll('#seg-detect .speaker').forEach(r=>r.style.display='none');
-      A.detect(paths[0]).then(call=>{
-        if(!call||call.error){ if(h)h.textContent='Couldn’t read that file'; return; }
-        renderDetect(call);
-      }).catch(e=>{console.error('detect',e); if(h)h.textContent='Couldn’t read that file';});
-    }).catch(e=>console.error('pick_files',e));
+    A.pick_files().then(openDetect).catch(e=>console.error('pick_files',e));
   };
   function renderDetect(call){
     currentDetect=call; currentSource=call.source||null;
@@ -848,7 +869,13 @@
     const t=setInterval(()=>{i++;if(i>=steps.length){clearInterval(t);show('transcript');return}m.textContent=steps[i]},1400);
   };
 
-  window.appEvent=function(ev,p){if(ev==='job')onJob(p)};
+  window.appEvent=function(ev,p){ if(ev==='job')onJob(p); else if(ev==='dropped')openDetect(p&&p.paths); };
+  (function(){ const dz=document.getElementById('dropzone'); let depth=0;
+    addEventListener('dragenter',e=>{e.preventDefault();depth++;if(dz)dz.classList.add('show');});
+    addEventListener('dragover',e=>{e.preventDefault();});
+    addEventListener('dragleave',e=>{e.preventDefault();depth=Math.max(0,depth-1);if(depth===0&&dz)dz.classList.remove('show');});
+    addEventListener('drop',e=>{e.preventDefault();depth=0;if(dz)dz.classList.remove('show');});
+  })();
   function onJob(p){
     let c=calls.find(x=>x.id===p.id);
     if(!c){c={id:p.id,name:p.name||'Call',status:'working',prog:0,seed:7};calls.unshift(c);}
