@@ -338,6 +338,10 @@
   .p-verbs{display:flex;gap:16px;margin:11px 0 0 43px}
   .p-verbs button{font-size:12.5px;color:var(--muted)}
   .p-verbs button:hover{color:var(--ink)}
+  .rm-pick{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 2px 43px}
+  .rm-pick button{font-size:12.5px;padding:5px 12px;border:1px solid var(--line-strong);border-radius:999px;transition:border-color .12s,background .12s}
+  .rm-pick button:hover{border-color:var(--accent)}
+  .rm-pick button.on{background:var(--accent);color:var(--accent-ink);border-color:transparent}
 
   /* person row where the ribbon IS the control surface */
   .lang-tok{font-family:var(--font-mono);font-size:11px;color:var(--faint);border:1px solid var(--line);
@@ -814,51 +818,62 @@
     const h=document.querySelector('#seg-detect h2');
     if(h)h.textContent=n===1?'One person on this call':(n===2?'Two people on this call':`${n} people on this call`);
     const dp=document.getElementById('detect-people'); if(!dp)return;
-    dp.innerHTML=call.people.map((p,i)=>`
-      <div class="speaker${p.exclude?' excluded':''}" data-i="${i}">
+    dp.innerHTML=call.people.filter(p=>!p.exclude).map((p)=>{const i=call.people.indexOf(p);return `
+      <div class="speaker" data-i="${i}">
         <button class="play" aria-label="Preview"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></button>
         <span class="av" style="background:var(--spk-${p.lane||'a'})">${esc((p.name||'?').trim().charAt(0).toUpperCase()||'?')}</span>
         <input value="${esc(p.name).replace(/"/g,'&quot;')}" oninput="detName(${i},this.value)" aria-label="Speaker name">
         <span class="mini" style="--c:var(--spk-${p.lane||'a'})">${miniBars(7+i*3,22)}</span>
-        <button class="det-x" title="Don’t transcribe" onclick="detExclude(${i})">${p.exclude?'add back':'remove'}</button>
-      </div>`).join('')
-      + (call.setaside.length?`<div class="aside-line">${call.setaside.map((a,j)=>`<button class="aside-add" onclick="detAdd(${j})">+ Add ${esc(a.name)}</button>`).join('')}</div>`:'');
-    dp.querySelectorAll('.speaker').forEach((row,i)=>{const p=call.people[i];
+      </div>`;}).join('');
+    dp.querySelectorAll('.speaker').forEach((row)=>{const i=+row.dataset.i;const p=call.people[i];
       const pb=row.querySelector('.play'); if(pb)pb.onclick=()=>preview(pb,call.source,p.audio||0,p.start||0);});
   }
   window.detName=function(i,v){const p=currentDetect&&currentDetect.people[i];if(p)p.name=v;};
-  window.detExclude=function(i){const p=currentDetect&&currentDetect.people[i];if(!p)return;
-    if(!p.exclude && currentDetect.people.filter(x=>!x.exclude).length<=1)return;
-    p.exclude=!p.exclude; stopAllAudio(); renderDetect(currentDetect);};
-  window.detAdd=function(j){const a=currentDetect&&currentDetect.setaside[j];if(!a)return;
-    const lane=currentDetect.people.length%2===0?'a':'b';
-    currentDetect.people.push({index:a.index,audio:a.audio,name:a.name,lane,ghost:null,start:a.start});
-    currentDetect.setaside.splice(j,1); stopAllAudio(); renderDetect(currentDetect);};
 
-  // The Fix-speakers overlay, rendered from the real detected people.
+  // The Fix-speakers overlay: the editing surface. Every speaker shows a waveform;
+  // you can rename, preview, not-transcribe, or remove another speaker's voice.
   function renderFix(){
     const body=document.getElementById('fix-body'); if(!body)return;
     const call=currentDetect;
     if(!call||!call.people){ body.innerHTML='<p style="color:var(--muted);font-size:13px">Add a call to adjust its speakers.</p>'; return; }
-    body.innerHTML=call.people.map((p,i)=>`
-      <div class="person${p.exclude?' excluded':''}" data-i="${i}">
+    const nameOf=idx=>{const q=call.people.find(x=>x.index===idx);return q?q.name:'that voice';};
+    body.innerHTML=call.people.map((p,i)=>{
+      const others=call.people.filter(x=>!x.exclude && x.index!==p.index);
+      const rem=(p.removes&&p.removes.length)?`<div class="p-clean">Removing ${esc(p.removes.map(nameOf).join(', '))}’s voice. <span class="ul" onclick="fixClearRemoves(${i})">undo</span></div>`:'';
+      const pick=p._pick?`<div class="rm-pick">${others.length?others.map(o=>`<button class="${(p.removes||[]).includes(o.index)?'on':''}" onclick="fixRemoveVoice(${i},${o.index})">${esc(o.name)}</button>`).join(''):'<span style="color:var(--muted);font-size:12px">No other speakers</span>'}</div>`:'';
+      return `<div class="person${p.exclude?' excluded':''}" data-i="${i}">
         <div class="p-top">
           <button class="p-play" aria-label="Listen"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></button>
           <span class="p-dot" style="background:var(--spk-${p.lane||'a'})"></span>
           <input class="p-name" value="${esc(p.name).replace(/"/g,'&quot;')}" oninput="fixName(${i},this.value)" aria-label="Name">
           <button class="lang-tok" onclick="cycleLang(this)" title="Language">CS</button>
         </div>
-        ${p.ghost?`<div class="rib" data-seed="${7+i*3}" data-ink="var(--spk-${p.lane||'a'})" data-ghost="var(--spk-${p.lane==='a'?'b':'a'})" data-ghost-name="${esc(p.ghost)}" data-person="${i}" ${p.keepGhost?'data-keep="1"':''}></div>`:''}
-        <div class="p-verbs"><button onclick="fixExclude(${i})">${p.exclude?'Transcribe this person':'Don’t transcribe this person'}</button></div>
-      </div>`).join('');
-    body.querySelectorAll('.person').forEach((row,i)=>{const p=call.people[i];const pb=row.querySelector('.p-play');
+        <div class="rib" data-seed="${7+i*3}" data-ink="var(--spk-${p.lane||'a'})"></div>
+        ${rem}
+        <div class="p-verbs">
+          <button onclick="fixExclude(${i})">${p.exclude?'Transcribe this person':'Don’t transcribe'}</button>
+          <button onclick="fixPick(${i})">Remove a voice…</button>
+        </div>
+        ${pick}
+      </div>`;
+    }).join('')
+    + (call.setaside&&call.setaside.length?`<div class="aside-line">${call.setaside.map((a,j)=>`<button class="aside-add" onclick="fixAdd(${j})">+ Add ${esc(a.name)}</button>`).join('')}</div>`:'');
+    body.querySelectorAll('.person').forEach(row=>{const i=+row.dataset.i;const p=call.people[i];const pb=row.querySelector('.p-play');
       if(pb)pb.onclick=()=>preview(pb,call.source,p.audio||0,p.start||0);});
     buildRibs();
   }
   window.fixName=function(i,v){ if(currentDetect&&currentDetect.people[i])currentDetect.people[i].name=v; };
   window.fixExclude=function(i){ const p=currentDetect&&currentDetect.people[i]; if(!p)return;
-    if(!p.exclude && currentDetect.people.filter(x=>!x.exclude).length<=1)return; // keep at least one
+    if(!p.exclude && currentDetect.people.filter(x=>!x.exclude).length<=1)return;
     p.exclude=!p.exclude; stopAllAudio(); renderFix(); };
+  window.fixPick=function(i){ const p=currentDetect&&currentDetect.people[i]; if(p){p._pick=!p._pick; renderFix();} };
+  window.fixRemoveVoice=function(i,other){ const p=currentDetect&&currentDetect.people[i]; if(!p)return;
+    p.removes=p.removes||[]; const k=p.removes.indexOf(other); if(k>=0)p.removes.splice(k,1); else p.removes.push(other); renderFix(); };
+  window.fixClearRemoves=function(i){ const p=currentDetect&&currentDetect.people[i]; if(p){p.removes=[]; renderFix();} };
+  window.fixAdd=function(j){ const a=currentDetect&&currentDetect.setaside[j]; if(!a)return;
+    const lane=currentDetect.people.length%2===0?'a':'b';
+    currentDetect.people.push({index:a.index,audio:a.audio,name:a.name,lane,ghost:null,removes:[],start:a.start});
+    currentDetect.setaside.splice(j,1); stopAllAudio(); renderFix(); };
 
   window.openCall=function(i){
     const c=calls[i]; if(!c||c.status!=='done')return;
@@ -874,13 +889,13 @@
   window.startProc=function(){
     const A=api();
     if(A&&currentDetect){
-      const names={},speakers=[],keep_voice=[];
-      currentDetect.people.forEach(p=>{ if(p.exclude)return; speakers.push(p.index); names[p.index]=p.name; if(p.ghost&&p.keepGhost)keep_voice.push(p.index); });
+      const names={},speakers=[],subtractions={};
+      currentDetect.people.forEach(p=>{ if(p.exclude)return; speakers.push(p.index); names[p.index]=p.name; if(p.removes&&p.removes.length)subtractions[p.index]=p.removes; });
       const q=document.querySelector('#seg-detect .qpick.sel');
       const quality=(q&&q.textContent.trim()==='Faster')?'Fast':'Best';
       const tidy=!!document.querySelector('.qstep .sw.on');
       A.set_settings({quality,tidy});
-      A.transcribe(currentDetect.id,{names,speakers,keep_voice,quality,tidy});
+      A.transcribe(currentDetect.id,{names,speakers,subtractions,quality,tidy});
       if(!calls.find(c=>c.id===currentDetect.id))
         calls.unshift({id:currentDetect.id,name:currentDetect.name,status:'working',prog:0,seed:7});
       renderCalls();renderCards();show('home');

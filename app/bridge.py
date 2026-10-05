@@ -227,19 +227,27 @@ class Bridge:
         }
 
     def _first_speech(self, source: Path, stream_index: int) -> float:
-        """Seconds to the first real speech in a track (so previews skip long quiet
-        intros). Scans the first ~5 minutes; 0.0 if nothing stands out."""
+        """Seconds to the first SUSTAINED speech (so previews skip quiet intros and
+        don't land on a one-off transient like a bump on the desk). Looks for the
+        first ~4s stretch that's mostly at a real talking level. 0.0 if unsure."""
         try:
             import numpy as np
+            import statistics
             rate = track_separation.ANALYSIS_RATE
-            pcm = track_separation.decode_track_pcm(source, stream_index, start_s=0.0, duration_s=300.0)
-            if len(pcm) == 0:
-                return 0.0
+            pcm = track_separation.decode_track_pcm(source, stream_index, start_s=0.0, duration_s=360.0)
             win = int(0.5 * rate)
-            ref = float(np.sqrt(np.mean(pcm * pcm))) + 1e-9
-            for s in range(0, len(pcm) - win, win):
-                if float(np.sqrt(np.mean(pcm[s:s + win] ** 2))) > 0.25 * ref:
-                    return max(0.0, s / rate - 0.3)
+            n = len(pcm) // win
+            if n < 1:
+                return 0.0
+            rms = [float(np.sqrt(np.mean(pcm[i * win:(i + 1) * win] ** 2))) for i in range(n)]
+            peak = max(rms) or 1.0
+            voiced = [r for r in rms if r > 0.04 * peak]  # ignore near-silence
+            level = statistics.median(voiced) if voiced else peak  # typical talking level
+            thr = 0.4 * level
+            run, need = 8, 6  # 6 of 8 half-second windows active => ~3-4s of real talk
+            for i in range(0, n - run):
+                if sum(1 for r in rms[i:i + run] if r > thr) >= need:
+                    return max(0.0, i * 0.5 - 0.3)
         except Exception:  # noqa: BLE001
             pass
         return 0.0
@@ -290,6 +298,7 @@ class Bridge:
             people.append({
                 "index": s.index, "audio": pos_by_index.get(s.index, n), "name": kept_name[s.index],
                 "lane": "a" if n % 2 == 0 else "b", "ghost": ghost,
+                "removes": list((subs or {}).get(s.index, [])),  # other voices removed from this one
                 "start": self._first_speech(job.source_path, s.index),
             })
         set_aside = [{
@@ -315,9 +324,10 @@ class Bridge:
         speakers = options.get("speakers")  # final set of track indices to transcribe
         if speakers:
             job.selected_track_indices = {int(x) for x in speakers}
-        for mix in options.get("keep_voice", []):  # user chose to keep a bled-in voice
-            if job.track_subtractions:
-                job.track_subtractions.pop(int(mix), None)
+        subs = options.get("subtractions")  # {person index: [voice indices to remove]}
+        if subs is not None:
+            cleaned = {int(k): [int(x) for x in v] for k, v in subs.items() if v}
+            job.track_subtractions = cleaned or None
         job.status = "queued"
         self.job_queue.put(job)
         self._emit("job", {"id": job.id, "status": "queued", "progress": 0})
