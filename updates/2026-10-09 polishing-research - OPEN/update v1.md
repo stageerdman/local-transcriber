@@ -58,3 +58,30 @@ verbatim from the user's Downloads.
 - Confidence-gated correction (the one useful GER idea) needs ASR logprobs the
   finished `.md` doesn't carry → out of scope; noted for a future engine-level
   update.
+
+## ▶ RESUME HERE (parked 2026-10-09)
+**State: core goal DONE and SHIPPED to `main`.** The winner (minimal-edit prompt
++ ~5-turn batches) is live in `src/polish.py` (commit `5b13d27`); full suite
+green (112 passed); verified on real blocks. This update is left OPEN only for
+the *optional* follow-ups below — nothing is half-finished.
+
+How to re-run the lab (nothing committed is destructive):
+- Raw transcript is gitignored (`data/marek_p2_raw.md`); re-copy from the user's
+  source if missing. `results/` is gitignored and regenerated.
+- `cd spike && ../../../.venv/bin/python run.py tournament` (excerpt sweep) then
+  `run.py finals` (full transcript). Cached + resumable; survives wifi blips.
+
+Optional next steps (priority order):
+1. Add an optional **high-assurance ensemble mode** to `src/polish.py` (3-model
+   edit-vote; see `strategies.algo_ensemble` + `wiki.md` §4e) behind a toggle.
+2. Revisit `polish_text()` chunk size (single-speaker path still 6000 chars).
+3. Engine-level **confidence-gated** correction (needs ASR logprobs) — separate
+   update.
+
+Watch-outs for future-me:
+- **Don't trust the LLM judge's hallucination count alone** — it rated the
+  worst, most-inventive variant as best. Gate on deterministic drift
+  (number/word-retention) + direct reading of risk blocks (prices, negations).
+- `novelW` over-counts here (garbled ASR means legit fixes look "novel").
+- Keep the real call transcript OUT of git (it's sensitive; `.gitignore` handles
+  `data/`+`results/`).

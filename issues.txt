@@ -38,3 +38,18 @@
         * debug=True (devtools) still on in app/webview_main.py; retire Tkinter
           (app/main_tk.py, app/ui.py) once confident; prune dead prototype CSS.
       See the update's "▶ RESUME HERE" for the full picture.
+
+- [ ] Polishing quality (updates/2026-10-09 polishing-research - OPEN/): the
+      benchmark winner is SHIPPED in src/polish.py (minimal-edit prompt +
+      ~5-turn batches; beat the old prompt on readability AND faithfulness, no
+      fabrication). Optional, not yet done:
+        * high-assurance mode = 3-model edit-vote ensemble (marks unclear audio
+          [nesrozumitelné], never guesses) as an optional toggle — safest but 3×
+          cost + under-corrects; design in wiki.md §4e.
+        * polish_text() (single-speaker plain text) still uses a large 6000-char
+          chunk; shrinking toward the "moderate context" finding is untested.
+        * confidence-gated correction (only touch low-confidence ASR spans) needs
+          ASR logprobs the .md doesn't carry — an engine-level idea, out of scope.
+      The LLM judge alone is unreliable for this (fooled by fluent paraphrase);
+      trust the deterministic drift + direct reading. See the update's Resume
+      notes.
