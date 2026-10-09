@@ -333,28 +333,60 @@
   .person .p-more:hover{background:var(--surface-2)}
   .ribbon{display:flex;align-items:flex-end;gap:2px;height:26px;margin:10px 0 0 43px}
   .ribbon i{flex:1;border-radius:2px;align-self:flex-end}
-  .p-clean{font-size:12px;color:var(--muted);margin:8px 0 0 43px;display:flex;align-items:center;gap:8px}
-  .p-clean .ul{color:var(--accent);cursor:pointer;font-weight:600}
-  .p-verbs{display:flex;gap:16px;margin:11px 0 0 43px}
-  .p-verbs button{font-size:12.5px;color:var(--muted)}
-  .p-verbs button:hover{color:var(--ink)}
-  .rm-pick{display:flex;flex-wrap:wrap;gap:8px;margin:8px 0 2px 43px}
-  .rm-pick button{font-size:12.5px;padding:5px 12px;border:1px solid var(--line-strong);border-radius:999px;transition:border-color .12s,background .12s}
-  .rm-pick button:hover{border-color:var(--accent)}
-  .rm-pick button.on{background:var(--accent);color:var(--accent-ink);border-color:transparent}
+  .p-verbs{position:relative;display:flex;align-items:center;gap:16px;margin:11px 0 0 43px}
+  .p-verbs>button{font-size:12.5px;color:var(--muted)}
+  .p-verbs>button:hover{color:var(--ink)}
+  /* Remove-a-voice: one cycling picker button + a small menu */
+  .rv-cycle{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;font-weight:600;
+    border:1px solid var(--line-strong);border-radius:999px;padding:6px 12px;color:var(--muted);
+    transition:border-color .12s,background .12s,color .12s}
+  .rv-cycle:hover{border-color:var(--accent);color:var(--ink)}
+  .rv-cycle .caret{font-size:10px;color:var(--faint)}
+  .rv-cycle.on{background:var(--accent);color:var(--accent-ink);border-color:transparent}
+  .rv-cycle.on .caret{color:var(--accent-ink)}
+  .rv-menu{position:absolute;z-index:5;top:100%;margin-top:6px;min-width:160px;background:var(--surface);
+    border:1px solid var(--line-strong);border-radius:var(--r-sm);box-shadow:var(--shadow-lift);
+    padding:5px;display:none}
+  .rv-menu.open{display:block;animation:fade .14s ease}
+  .rv-menu button{display:flex;align-items:center;gap:8px;width:100%;text-align:left;font-size:13px;
+    color:var(--ink);padding:8px 10px;border-radius:7px;transition:background .12s}
+  .rv-menu button:hover{background:var(--surface-2)}
+  .rv-menu button .chk{width:14px;height:14px;flex:none;border-radius:50%;opacity:0}
+  .rv-menu button[aria-checked="true"] .chk{opacity:1;background:var(--accent)}
+  /* ghost keep/remove moved off the wave into its own pill */
+  .rib-ghost-toggle{display:inline-flex;align-items:center;gap:9px;margin:9px 0 0 43px;
+    font-size:12.5px;color:var(--muted)}
+  .rib-ghost-toggle .gt-btn{font-weight:600;border:1px solid var(--line-strong);border-radius:999px;
+    padding:5px 12px;transition:border-color .12s,background .12s,color .12s}
+  .rib-ghost-toggle .gt-btn:hover{border-color:var(--accent)}
+  .rib-ghost-toggle .gt-btn.remove{background:var(--accent);color:var(--accent-ink);border-color:transparent}
+  /* preview progress — only visible while a sample plays */
+  .p-prog{display:none;margin:9px 0 0 43px}
+  .p-prog.show{display:block}
+  .p-prog-bar{height:3px;border-radius:2px;background:var(--surface-2);overflow:hidden}
+  .p-prog-fill{height:100%;border-radius:2px;background:var(--spk-a);width:0;transition:width .25s linear}
+  .p-prog-text{font-family:var(--font-mono);font-size:11.5px;color:var(--muted);
+    font-variant-numeric:tabular-nums;margin-top:6px}
 
   /* person row where the ribbon IS the control surface */
   .lang-tok{font-family:var(--font-mono);font-size:11px;color:var(--faint);border:1px solid var(--line);
     border-radius:5px;padding:2px 6px;letter-spacing:.03em;transition:border-color .12s,color .12s}
   .lang-tok:hover{border-color:var(--accent);color:var(--accent)}
   .rib{position:relative;height:30px;margin-top:9px;margin-left:43px}
+  .rib[role="slider"]{cursor:pointer}
   .rib-layer{position:absolute;inset:0;display:flex;align-items:flex-end;gap:2px}
   .rib-layer i{flex:1;border-radius:2px;align-self:flex-end}
-  .rib-ghost{cursor:pointer;transition:opacity .2s}
-  .rib-ghost i{opacity:.55;outline:none}
+  .rib-ghost{pointer-events:none;transition:opacity .2s}
+  .rib-ghost i{opacity:.55}
   .rib-ghost.removed i{opacity:.14}
+  .rib-cursor{position:absolute;top:0;bottom:0;width:1px;background:var(--line-strong);
+    opacity:0;pointer-events:none;transition:opacity .12s}
+  .rib[role="slider"]:hover .rib-cursor{opacity:1}
+  .rib-playhead{position:absolute;top:0;bottom:0;width:2px;border-radius:1px;background:var(--faint);
+    display:none;pointer-events:none;transition:left .25s linear}
+  .rib.playing .rib-playhead{background:var(--accent)}
   .rib-hint{position:absolute;right:0;top:-18px;font-size:11px;color:var(--muted);opacity:0;transition:opacity .15s;pointer-events:none}
-  .rib:hover .rib-hint{opacity:1}
+  .rib[role="slider"]:hover .rib-hint{opacity:1}
   .qeta{font-family:var(--font-mono);font-size:11.5px;color:var(--faint)}
   .setaside{margin:6px 0 2px;border-top:1px solid var(--line);padding-top:12px}
   .setaside summary{font-size:12.5px;color:var(--muted);cursor:pointer;font-weight:600;list-style:none;display:flex;align-items:center;gap:7px}
@@ -712,25 +744,38 @@
     a.textContent=nb;b.textContent=na;setSpk('a',nb);setSpk('b',na);
     document.getElementById('swapbtn').classList.toggle('spin');
   };
-  // Interactive ribbons: the wave IS the control surface. A bled-in voice shows
-  // as a struck ghost layer (removed by default); click to keep/remove it.
+  // The wave IS a sampling control surface: click (or scrub) a point to hear the
+  // voice from there. Bars are decorative, so the mapping is positional only —
+  // fraction of the width → that fraction of the recording.
   function buildRibs(){ document.querySelectorAll('.rib:not([data-built])').forEach(w=>{
     w.dataset.built='1';
-    const ink=w.dataset.ink,ghost=w.dataset.ghost,gname=w.dataset.ghostName,seed=+w.dataset.seed,n=46;
+    const ink=w.dataset.ink,seed=+w.dataset.seed,n=46,dur=+w.dataset.dur||0;
     const main=document.createElement('div');main.className='rib-layer';
     let mh='';for(let i=0;i<n;i++){const v=3+22*(0.25+0.75*rnd(seed+i*1.3));mh+=`<i style="height:${v}px;background:${ink}"></i>`}
     main.innerHTML=mh;w.appendChild(main);
-    if(ghost){
-      const g=document.createElement('div');g.className='rib-layer rib-ghost'+(w.dataset.keep==='1'?'':' removed');g.setAttribute('role','button');g.tabIndex=0;
-      let gh='';for(let i=0;i<n;i++){const v=3+15*(0.2+0.8*rnd(seed+100+i*1.7));gh+=`<i style="height:${v}px;background:${ghost}"></i>`}
-      g.innerHTML=gh;w.appendChild(g);
-      const hint=document.createElement('div');hint.className='rib-hint';
-      const idx=w.dataset.person; const setHint=rm=>hint.textContent=`${gname}'s voice — ${rm?'removed':'kept'}`;
-      setHint(w.dataset.keep!=='1');
-      w.appendChild(hint);
-      const toggle=()=>{const rm=g.classList.toggle('removed');setHint(rm); if(idx!=null&&currentDetect&&currentDetect.people[idx])currentDetect.people[idx].keepGhost=!rm;};
-      g.addEventListener('click',toggle);g.addEventListener('keydown',e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();toggle()}});
-    }
+    const cur=document.createElement('div');cur.className='rib-cursor';w.appendChild(cur);
+    const ph=document.createElement('div');ph.className='rib-playhead';w.appendChild(ph);
+    const hint=document.createElement('div');hint.className='rib-hint';w.appendChild(hint);
+    if(dur<=0)return;  // no duration → stays decorative, not a slider
+    const card=w.closest('.person');
+    w.setAttribute('role','slider');w.tabIndex=0;
+    w.setAttribute('aria-valuemin','0');w.setAttribute('aria-valuemax',String(Math.round(dur)));
+    w.setAttribute('aria-label',(w.dataset.name||'this voice')+' — click to play from a point');
+    const posAt=x=>{const r=w.getBoundingClientRect();return Math.max(0,Math.min(1,(x-r.left)/r.width))*dur;};
+    const showAt=s=>{const f=dur?s/dur:0;cur.style.left=(f*100)+'%';hint.textContent='Sample at '+fmtSecs(s);
+      w.setAttribute('aria-valuenow',String(Math.round(s)));w.setAttribute('aria-valuetext',fmtSecs(s));};
+    let pend=null,pendSecs=0;
+    const soon=s=>{pendSecs=s;showAt(s);if(pend)clearTimeout(pend);pend=setTimeout(()=>{if(card)previewAt(card,pendSecs);},200);};
+    w.addEventListener('mousemove',e=>{cur.style.opacity='1';showAt(posAt(e.clientX));});
+    w.addEventListener('mouseleave',()=>{cur.style.opacity='';hint.textContent='';});
+    w.addEventListener('click',e=>{const s=posAt(e.clientX);showAt(s);if(card)previewAt(card,s);});
+    w.addEventListener('wheel',e=>{e.preventDefault();const c=+(w.getAttribute('aria-valuenow')||0);
+      soon(Math.max(0,Math.min(dur,c+(e.deltaY>0?5:-5))));},{passive:false});
+    w.addEventListener('keydown',e=>{const c=+(w.getAttribute('aria-valuenow')||0);let nx=null;
+      if(e.key==='ArrowRight')nx=c+(e.shiftKey?30:5);else if(e.key==='ArrowLeft')nx=c-(e.shiftKey?30:5);
+      else if(e.key==='Home')nx=0;else if(e.key==='End')nx=dur-5;
+      else if(e.key==='Enter'||e.key===' '){e.preventDefault();if(card)previewAt(card,c);return;}
+      if(nx!=null){e.preventDefault();soon(Math.max(0,Math.min(dur,nx)));}});
   }); }
   buildRibs();
   window.cycleLang=function(el){const seq=['CS','EN','auto'];el.textContent=seq[(seq.indexOf(el.textContent)+1)%seq.length]};
@@ -745,12 +790,16 @@
     if(currentDetect&&currentDetect.people&&document.getElementById('detect-people'))renderDetect(currentDetect);};
   window.pickQuality=function(el,q){document.querySelectorAll('#seg-detect .qpick').forEach(c=>c.classList.remove('sel'));el.classList.add('sel');
     const eta=document.getElementById('qeta');if(eta)eta.textContent=q==='Best'?'~18 min':'~3 min'};
-  document.addEventListener('keydown',e=>{if(e.key==='Escape')closeFix()});
+  function closeRvMenus(){document.querySelectorAll('.rv-menu.open').forEach(m=>m.classList.remove('open'));
+    document.querySelectorAll('.rv-cycle[aria-expanded="true"]').forEach(b=>b.setAttribute('aria-expanded','false'));}
+  document.addEventListener('keydown',e=>{ if(e.key!=='Escape')return;
+    if(document.querySelector('.rv-menu.open')){closeRvMenus();return;} closeFix(); });
+  document.addEventListener('click',e=>{ if(!e.target.closest('.rv-cycle')&&!e.target.closest('.rv-menu'))closeRvMenus(); });
 
   // ===== engine bridge (pywebview). Falls back to the mock demo when absent. =====
   function api(){return (window.pywebview&&window.pywebview.api)||null}
   let currentDetect=null, currentSource=null, currentOutput=null, curSecs=0, isPlaying=false;
-  let posTimer=null, lastUserScroll=0, lastHi=-1;
+  let posTimer=null, lastUserScroll=0, lastHi=-1, previewTimer=null, activePrev=null;
   function tsToSecs(ts){const p=(ts||'').trim().split(':').map(Number);
     if(p.length===3)return (p[0]*3600+p[1]*60+p[2])||0; if(p.length===2)return (p[0]*60+p[1])||0; return 0;}
   function fmtSecs(s){s=Math.max(0,Math.round(s));const h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;
@@ -788,7 +837,39 @@
 
   // ---- one source of truth for audio: nothing plays in two places; everything stops on navigation ----
   function resetPreviewIcons(){document.querySelectorAll('[data-prev="1"]').forEach(b=>{b.dataset.prev='0';const s=b.querySelector('svg');if(s)s.innerHTML='<path d="M8 5v14l11-7z"/>';});}
-  function stopAllAudio(){const A=api();if(A)A.stop_audio();stopLoop();setPlayIcon(false);resetPreviewIcons();}
+  // Fix-speakers preview UI: hide every progress bar, drop the live playheads to
+  // their faint idle marker. Playing state lives only on the active card.
+  function stopPreviewUI(){ if(previewTimer){clearInterval(previewTimer);previewTimer=null;}
+    document.querySelectorAll('.p-prog.show').forEach(e=>e.classList.remove('show'));
+    document.querySelectorAll('.rib.playing').forEach(r=>r.classList.remove('playing'));
+    activePrev=null; }
+  function stopAllAudio(){const A=api();if(A)A.stop_audio();stopLoop();stopPreviewUI();setPlayIcon(false);resetPreviewIcons();}
+  // Play one voice from `startSecs`, driving that card's playhead + progress bar.
+  // Everything routes through stopAllAudio first, so only one card ever sounds.
+  function previewAt(card,startSecs){ const A=api(); if(!A||!currentSource||!card)return;
+    const rib=card.querySelector('.rib'); const audio=rib?(+rib.dataset.audio||0):0; const dur=rib?(+rib.dataset.dur||0):0;
+    startSecs=Math.max(0,startSecs||0);
+    stopAllAudio();
+    A.play_source(currentSource,startSecs,audio);
+    const pb=card.querySelector('.p-play'); if(pb){pb.dataset.prev='1';const s=pb.querySelector('svg');if(s)s.innerHTML='<path d="M7 5h4v14H7zM13 5h4v14h-4z"/>';}
+    activePrev=card;
+    const frac=dur?Math.max(0,Math.min(1,startSecs/dur)):0;
+    if(rib){rib.classList.add('playing');const ph=rib.querySelector('.rib-playhead');if(ph){ph.style.display='block';ph.style.left=(frac*100)+'%';}}
+    const prog=card.querySelector('.p-prog');
+    if(prog){prog.classList.add('show');
+      const bar=prog.querySelector('.p-prog-bar');if(bar)bar.style.display=dur?'block':'none';
+      const fill=prog.querySelector('.p-prog-fill');if(fill)fill.style.width=(frac*100)+'%';
+      const txt=prog.querySelector('.p-prog-text');if(txt)txt.textContent=dur?`Playing · ${fmtSecs(startSecs)} / ${fmtSecs(dur)}`:`Playing · ${fmtSecs(startSecs)}`;}
+    if(previewTimer)clearInterval(previewTimer);
+    previewTimer=setInterval(()=>{ const A2=api(); if(!A2){stopAllAudio();return;}
+      A2.playback_position().then(st=>{ if(!st||!st.playing){stopAllAudio();return;}
+        const s=st.seconds||0, f=dur?Math.max(0,Math.min(1,s/dur)):0;
+        const ph=rib&&rib.querySelector('.rib-playhead'); if(ph&&dur)ph.style.left=(f*100)+'%';
+        if(prog){const fill=prog.querySelector('.p-prog-fill');if(fill&&dur)fill.style.width=(f*100)+'%';
+          const bar=prog.querySelector('.p-prog-bar');if(bar)bar.setAttribute('aria-valuenow',String(Math.round(s)));
+          const txt=prog.querySelector('.p-prog-text');if(txt)txt.textContent=dur?`Playing · ${fmtSecs(s)} / ${fmtSecs(dur)}`:`Playing · ${fmtSecs(s)}`;}
+      }).catch(()=>{}); },300); }
+  window.previewAt=previewAt;
   function preview(btn,source,audio,start){const A=api();if(!A||!source)return;
     const was=btn&&btn.dataset.prev==='1'; stopAllAudio(); if(was)return;
     A.play_source(source,start||0,audio||0);
@@ -839,11 +920,21 @@
     const body=document.getElementById('fix-body'); if(!body)return;
     const call=currentDetect;
     if(!call||!call.people){ body.innerHTML='<p style="color:var(--muted);font-size:13px">Add a call to adjust its speakers.</p>'; return; }
+    const dur=call.dur_secs||0;
     const nameOf=idx=>{const q=call.people.find(x=>x.index===idx);return q?q.name:'that voice';};
     body.innerHTML=call.people.map((p,i)=>{
       const others=call.people.filter(x=>!x.exclude && x.index!==p.index);
-      const rem=(p.removes&&p.removes.length)?`<div class="p-clean">Removing ${esc(p.removes.map(nameOf).join(', '))}’s voice. <span class="ul" onclick="fixClearRemoves(${i})">undo</span></div>`:'';
-      const pick=p._pick?`<div class="rm-pick">${others.length?others.map(o=>`<button class="${(p.removes||[]).includes(o.index)?'on':''}" onclick="fixRemoveVoice(${i},${o.index})">${esc(o.name)}</button>`).join(''):'<span style="color:var(--muted);font-size:12px">No other speakers</span>'}</div>`:'';
+      // one staged removal target; drop it if it points at someone no longer in the roster
+      if(p.removes&&p.removes.length&&!others.some(o=>o.index===p.removes[0]))p.removes=[];
+      const target=(p.removes&&p.removes.length)?p.removes[0]:null;
+      const rvLabel=target!=null?`Remove ${esc(nameOf(target))}`:'Remove a voice';
+      // the Remove-a-voice picker is only meaningful when there's another voice to subtract
+      const rv=others.length?`<button class="rv-cycle${target!=null?' on':''}" aria-haspopup="menu" aria-expanded="false" aria-label="${esc(rvLabel)}" onclick="fixRvToggle(${i},event)">${rvLabel}<span class="caret">▾</span></button>
+        <div class="rv-menu" role="menu" id="rvm-${i}">
+          <button role="menuitemradio" aria-checked="${target==null}" onclick="fixRemoveVoice(${i},null)"><span class="chk"></span>No-one</button>
+          ${others.map(o=>`<button role="menuitemradio" aria-checked="${target===o.index}" onclick="fixRemoveVoice(${i},${o.index})"><span class="chk"></span>${esc(o.name)}</button>`).join('')}
+        </div>`:'';
+      const ghostAttr=p.ghost?` data-ghost-name="${esc(p.ghost).replace(/"/g,'&quot;')}"`:'';
       return `<div class="person${p.exclude?' excluded':''}" data-i="${i}">
         <div class="p-top">
           <button class="p-play" aria-label="Listen"><svg viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg></button>
@@ -851,28 +942,31 @@
           <input class="p-name" value="${esc(p.name).replace(/"/g,'&quot;')}" oninput="fixName(${i},this.value)" aria-label="Name">
           <button class="lang-tok" onclick="cycleLang(this)" title="Language">CS</button>
         </div>
-        <div class="rib" data-seed="${7+i*3}" data-ink="var(--spk-${p.lane||'a'})"></div>
-        ${rem}
+        <div class="rib" data-seed="${7+i*3}" data-ink="var(--spk-${p.lane||'a'})" data-dur="${dur}" data-audio="${p.audio||0}" data-name="${esc(p.name).replace(/"/g,'&quot;')}" data-person="${i}"${ghostAttr}></div>
+        <div class="p-prog"><div class="p-prog-bar" role="progressbar" aria-label="Preview position" aria-valuemin="0" aria-valuemax="${Math.round(dur)}" aria-valuenow="0"><div class="p-prog-fill" style="background:var(--spk-${p.lane||'a'})"></div></div><div class="p-prog-text" aria-live="off"></div></div>
         <div class="p-verbs">
-          <button onclick="fixExclude(${i})">${p.exclude?'Transcribe this person':'Don’t transcribe'}</button>
-          <button onclick="fixPick(${i})">Remove a voice…</button>
+          <button class="p-exclude" onclick="fixExclude(${i})">${p.exclude?'Transcribe this person':'Don’t transcribe'}</button>
+          ${rv}
         </div>
-        ${pick}
       </div>`;
     }).join('')
     + (call.setaside&&call.setaside.length?`<div class="aside-line">${call.setaside.map((a,j)=>`<button class="aside-add" onclick="fixAdd(${j})">+ Add ${esc(a.name)}</button>`).join('')}</div>`:'');
     body.querySelectorAll('.person').forEach(row=>{const i=+row.dataset.i;const p=call.people[i];const pb=row.querySelector('.p-play');
-      if(pb)pb.onclick=()=>preview(pb,call.source,p.audio||0,p.start||0);});
+      if(pb)pb.onclick=()=>{ if(activePrev===row)stopAllAudio(); else previewAt(row,p.start||0); };});
     buildRibs();
   }
   window.fixName=function(i,v){ if(currentDetect&&currentDetect.people[i])currentDetect.people[i].name=v; };
   window.fixExclude=function(i){ const p=currentDetect&&currentDetect.people[i]; if(!p)return;
     if(!p.exclude && currentDetect.people.filter(x=>!x.exclude).length<=1)return;
     p.exclude=!p.exclude; stopAllAudio(); renderFix(); };
-  window.fixPick=function(i){ const p=currentDetect&&currentDetect.people[i]; if(p){p._pick=!p._pick; renderFix();} };
+  window.fixRvToggle=function(i,ev){ if(ev)ev.stopPropagation();
+    const menu=document.getElementById('rvm-'+i); if(!menu)return;
+    const btn=menu.previousElementSibling; const open=menu.classList.contains('open');
+    document.querySelectorAll('.rv-menu.open').forEach(m=>m.classList.remove('open'));
+    document.querySelectorAll('.rv-cycle[aria-expanded="true"]').forEach(b=>b.setAttribute('aria-expanded','false'));
+    if(!open){menu.classList.add('open'); if(btn&&btn.classList.contains('rv-cycle'))btn.setAttribute('aria-expanded','true');} };
   window.fixRemoveVoice=function(i,other){ const p=currentDetect&&currentDetect.people[i]; if(!p)return;
-    p.removes=p.removes||[]; const k=p.removes.indexOf(other); if(k>=0)p.removes.splice(k,1); else p.removes.push(other); renderFix(); };
-  window.fixClearRemoves=function(i){ const p=currentDetect&&currentDetect.people[i]; if(p){p.removes=[]; renderFix();} };
+    p.removes=(other==null)?[]:[other]; renderFix(); };
   window.fixAdd=function(j){ const a=currentDetect&&currentDetect.setaside[j]; if(!a)return;
     const lane=currentDetect.people.length%2===0?'a':'b';
     currentDetect.people.push({index:a.index,audio:a.audio,name:a.name,lane,ghost:null,removes:[],start:a.start});
