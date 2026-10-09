@@ -54,13 +54,32 @@ def _is_parakeet_model(model_name: str) -> bool:
 # temperature ladder drops the high-temp retries that invent text. No
 # `initial_prompt` on purpose - a content-ful Czech prompt leaked into the
 # output as fabricated text in testing.
+#
+# `word_timestamps=True` turns on DTW alignment so each segment carries per-word
+# start/end. We anchor a turn to its first word's start (see `_seg_times`):
+# Whisper's segment-level starts are only accurate to a second or two and drift
+# early in fast cross-talk, which showed up as read-along turns highlighting
+# ~2s ahead of the audio. Word starts are frame-accurate.
 WHISPER_DECODE_OPTS: dict[str, Any] = {
     "condition_on_previous_text": False,
     "temperature": (0.0, 0.2, 0.4),
     "no_speech_threshold": 0.6,
     "compression_ratio_threshold": 2.4,
     "logprob_threshold": -1.0,
+    "word_timestamps": True,
 }
+
+
+def _seg_times(seg: dict) -> tuple[float, float]:
+    """(start, end) for a Whisper segment, preferring its word-level times.
+
+    Falls back to the segment's own start/end when word timestamps are absent
+    (e.g. a segment that produced no aligned words), so this is safe whether or
+    not `word_timestamps` was on."""
+    words = [w for w in seg.get("words", []) if w.get("start") is not None]
+    if words:
+        return float(words[0]["start"]), float(words[-1]["end"])
+    return float(seg["start"]), float(seg["end"])
 
 
 def ensure_mlx_whisper_available() -> None:
@@ -170,11 +189,13 @@ def _transcribe_whisper_plain(
         verbose=False,
         **WHISPER_DECODE_OPTS,
     )
-    return [
-        TranscribedSegment(start=float(seg["start"]), end=float(seg["end"]), text=seg.get("text", "").strip())
-        for seg in result.get("segments", [])
-        if seg.get("text", "").strip()
-    ]
+    segments = []
+    for seg in result.get("segments", []):
+        text = seg.get("text", "").strip()
+        if text:
+            start, end = _seg_times(seg)
+            segments.append(TranscribedSegment(start=start, end=end, text=text))
+    return segments
 
 
 # Silero VAD chunking: keep each decode under Whisper's 30 s window, pad speech a
@@ -254,9 +275,10 @@ def _transcribe_whisper_vad(
         for seg in result.get("segments", []):
             text = seg.get("text", "").strip()
             if text:
+                start, end = _seg_times(seg)
                 segments.append(TranscribedSegment(
-                    start=offset + float(seg["start"]),
-                    end=offset + float(seg["end"]),
+                    start=offset + start,
+                    end=offset + end,
                     text=text,
                 ))
         done_speech += end - start
