@@ -1,0 +1,7 @@
+# Never commit the real sales-call transcript or its polished variants —
+# sensitive personal content. The harness regenerates results from the raw,
+# and the raw lives in the user's own storage, not the repo.
+data/
+results/
+spike/__pycache__/
+*.pyc
