@@ -50,7 +50,7 @@ def main() -> int:
             pass
     window.events.loaded += _attach_dnd
     # debug=True enables right-click → Inspect Element (web console) for diagnosing.
-    webview.start(debug=True)
+    webview.start(debug=False)
     return 0
 
 

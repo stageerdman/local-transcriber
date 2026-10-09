@@ -454,7 +454,7 @@
   <main class="main">
 
     <!-- Home -->
-    <section class="view home" id="view-home">
+    <section class="view home show" id="view-home">
       <div class="home-inner">
         <h1 class="greet">Good afternoon, Jakub.</h1>
         <div class="drop" onclick="newCall()">
@@ -472,7 +472,7 @@
     </section>
 
     <!-- Transcript (hero) -->
-    <section class="view show" id="view-transcript">
+    <section class="view" id="view-transcript">
       <div class="t-head">
         <div class="row1">
           <span class="t-title">Petr Sochůrek</span>
@@ -938,6 +938,7 @@
       if(calls[0])calls[0].active=true;
       renderCalls();renderCards();
       if(calls[0]&&calls[0].output)window.openCall(0);
+      else window.show('home');
     }).catch(()=>{});
   }
   window.addEventListener('pywebviewready',initBridge);
