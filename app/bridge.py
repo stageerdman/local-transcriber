@@ -14,6 +14,7 @@ Progress is pushed to the UI via `self._emit(event, payload)` → `window.appEve
 from __future__ import annotations
 
 import json
+import os
 import queue
 import re
 import threading
@@ -124,6 +125,22 @@ class Bridge:
         except Exception:
             pass
         self.job_queue.put(SENTINEL)
+
+    def user_name(self) -> str:
+        """The account's display name for the home greeting. macOS stores a full
+        name in the gecos field (e.g. "Stage Erdman" → "Stage"); fall back to the
+        login name, or "" so the UI greets without a name rather than a wrong one."""
+        try:
+            import pwd
+            gecos = pwd.getpwuid(os.getuid()).pw_gecos.split(",")[0].strip()
+            if gecos:
+                return gecos.split()[0]
+        except Exception:  # noqa: BLE001 - best-effort; fall through to login name
+            pass
+        try:
+            return (os.getlogin() or "").strip()
+        except Exception:  # noqa: BLE001
+            return ""
 
     # -- settings -------------------------------------------------------------
     def get_settings(self) -> dict:
@@ -350,6 +367,10 @@ class Bridge:
             "detail": job.status_detail or job.status,
         }
         payload["source"] = str(job.source_path)
+        if job.status == "polishing":
+            # polish emits no percentage; hand the UI an ETA so it can show a
+            # "Polishing the text… about N left" tail instead of a frozen 100%.
+            payload["polish_eta"] = int(job.estimated_polish_seconds or 0)
         if job.status == "done" and job.output_path:
             payload["output"] = str(job.output_path)
             try:

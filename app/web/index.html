@@ -116,6 +116,11 @@
   /* call-item status variants */
   .call-item .ci-prog{height:3px;border-radius:2px;background:var(--surface-2);overflow:hidden;margin-top:5px}
   .call-item .ci-prog i{display:block;height:100%;background:linear-gradient(90deg,var(--spk-b),var(--spk-a));border-radius:2px}
+  /* indeterminate: a phase that's working but has no honest % (prep / polish) */
+  .call-item .ci-prog i.indet{width:38%;animation:indet 1.15s ease-in-out infinite}
+  @keyframes indet{0%{margin-left:-38%}100%{margin-left:100%}}
+  @media (prefers-reduced-motion:reduce){.call-item .ci-prog i.indet{animation:none;width:100%;opacity:.45}}
+  .stat.err{color:#D9534F}
   .call-item.is-queued{opacity:.6}
   .call-item .stat{font-size:11px;font-weight:600}
   .stat.working{color:var(--accent)} .stat.queued{color:var(--faint)}
@@ -488,7 +493,7 @@
     <!-- Home -->
     <section class="view home show" id="view-home">
       <div class="home-inner">
-        <h1 class="greet">Good afternoon, Jakub.</h1>
+        <h1 class="greet" id="greet">Hello.</h1>
         <div class="drop" onclick="newCall()">
           <div class="wave" aria-hidden="true"></div>
           <h3>Drop a call — or a whole folder of them</h3>
@@ -665,7 +670,8 @@
       const dots=c.status==='done'
         ? `<span class="dots">${c.people===3?'<i style="background:var(--spk-a)"></i><i style="background:var(--spk-b)"></i><i style="background:#8a8a94"></i>':'<i style="background:var(--spk-a)"></i><i style="background:var(--spk-b)"></i>'}</span>` : '';
       let body='';
-      if(c.status==='working') body=`<span class="ci-meta stat working">Transcribing · ${c.people} people</span><div class="ci-prog"><i style="width:${c.prog}%"></i></div>`;
+      if(c.status==='working') body=progHtml(c);
+      else if(c.status==='error') body=`<span class="ci-meta stat err">${esc('Couldn’t finish'+(c.err?' — '+c.err:''))}</span>`;
       else if(c.status==='queued') body=`<span class="ci-meta stat queued">Queued</span>`;
       else body=`<span class="ci-meta">${c.when} · ${c.dur} · ${c.people} people</span>`;
       return `<button class="call-item ${c.active?'active':''} ${c.status==='queued'?'is-queued':''}" data-i="${i}"
@@ -676,7 +682,8 @@
   function renderCards(){
     const done=calls.filter(c=>c.status==='done');
     document.getElementById('homecards').innerHTML=calls.map((c,i)=>{
-      const meta=c.status==='working'?`<span class="stat working">Transcribing ${c.prog}%</span>`
+      const meta=c.status==='working'?`<span class="stat working">${esc(phaseView(c).label)}</span>`
+        :c.status==='error'?`<span class="stat err">Couldn’t finish</span>`
         :c.status==='queued'?`<span class="stat queued">Queued</span>`
         :`<span>${c.when} · ${c.dur}</span>`;
       return `<button class="card" onclick="openCall(${i})" ${c.status!=='done'?'style="opacity:.72"':''}>
@@ -1015,20 +1022,64 @@
   function onJob(p){
     let c=calls.find(x=>x.id===p.id);
     if(!c){c={id:p.id,name:p.name||'Call',status:'working',prog:0,seed:7};calls.unshift(c);}
-    if(p.status==='done'){c.status='done';c.prog=100;c.when='Just now';c.output=p.output;c.transcript=p.transcript;}
-    else if(p.status==='error'){c.status='error';c.err=p.error;}
-    else {c.status='working';if(typeof p.progress==='number')c.prog=p.progress;}
+    if(p.status==='done'){c.status='done';c.prog=100;c.phase=null;c.detail=null;c.polishStart=0;c.when='Just now';c.output=p.output;c.transcript=p.transcript;}
+    else if(p.status==='error'){c.status='error';c.phase=null;c.err=p.error;}
+    else {c.status='working';c.phase=p.status;c.detail=p.detail||null;
+      if(typeof p.progress==='number')c.prog=p.progress;
+      if(p.status==='polishing'){ if(!c.polishStart)c.polishStart=Date.now(); c.polishEta=p.polish_eta||0; startPhaseTicker(); }
+      else c.polishStart=0;
+    }
     renderCalls();renderCards();
   }
+  // Friendly, honest view of a working call's phase. Transcription reports a real
+  // %, the surrounding phases don't — those get an active (indeterminate) bar so
+  // the app never claims a precise number it doesn't have; polish shows a time tail.
+  function phaseView(c){
+    if(c.status==='error')return{label:'Couldn’t finish'+(c.err?' — '+c.err:''),mode:'none'};
+    switch(c.phase||c.status){
+      case 'queued':return{label:'Queued',mode:'none'};
+      case 'separating speakers':return{label:'Separating speakers…',mode:'indet'};
+      case 'converting':return{label:'Preparing audio…'+(c.detail?' · '+c.detail:''),mode:'indet'};
+      case 'loading model':return{label:'Loading model…',mode:'indet'};
+      case 'transcribing':return{label:'Transcribing · '+Math.round(c.prog||0)+'%'+(c.detail?' · '+c.detail:''),pct:c.prog||0,mode:'bar'};
+      case 'polishing':{
+        const eta=c.polishEta||0,el=(Date.now()-(c.polishStart||Date.now()))/1000,left=Math.max(0,Math.round(eta-el));
+        const tail=!eta?'':(left>60?' · about '+Math.ceil(left/60)+' min left':(left>0?' · about '+left+'s left':' · almost done'));
+        return{label:'Polishing the text…'+tail,pct:eta?Math.min(96,el/eta*100):0,mode:eta?'bar':'indet'};
+      }
+      default:return (c.status==='working'&&typeof c.prog==='number')
+        ?{label:'Transcribing · '+Math.round(c.prog)+'%',pct:c.prog,mode:'bar'}
+        :{label:'Working…',mode:'indet'};
+    }
+  }
+  function progHtml(c){ const v=phaseView(c);
+    if(v.mode==='none')return `<span class="ci-meta stat working">${esc(v.label)}</span>`;
+    const inner=v.mode==='indet'?'<i class="indet"></i>':`<i style="width:${Math.max(2,v.pct||0)}%"></i>`;
+    return `<span class="ci-meta stat working">${esc(v.label)}</span><div class="ci-prog">${inner}</div>`;
+  }
+  // While a call is polishing there are no server events to re-render on, so tick
+  // the time tail ourselves until polishing ends (then stop).
+  let phaseTimer=null;
+  function startPhaseTicker(){ if(phaseTimer)return;
+    phaseTimer=setInterval(()=>{ if(!calls.some(c=>c.status==='working'&&c.phase==='polishing')){clearInterval(phaseTimer);phaseTimer=null;return;}
+      renderCalls();renderCards(); },1000); }
 
   function applySettings(s){
     document.querySelectorAll('#seg-detect .qpick').forEach(b=>{const isFast=b.textContent.trim()==='Faster';b.classList.toggle('sel',(s.quality==='Fast')===isFast);});
     const eta=document.getElementById('qeta');if(eta)eta.textContent=s.quality==='Fast'?'~3 min':'~18 min';
     const sw=document.querySelector('.qstep .sw');if(sw)sw.classList.toggle('on',!!s.tidy);
   }
+  function setGreeting(name){
+    const el=document.getElementById('greet'); if(!el)return;
+    const h=new Date().getHours();
+    const part=h<12?'Good morning':(h<18?'Good afternoon':'Good evening');
+    el.textContent=name?`${part}, ${name}.`:`${part}.`;
+  }
   function initBridge(){
     const A=api(); if(!A)return;
     mock=false;
+    setGreeting('');
+    if(A.user_name)A.user_name().then(n=>setGreeting((n||'').trim())).catch(()=>{});
     A.get_settings().then(applySettings).catch(()=>{});
     A.recent_calls().then(list=>{
       calls.length=0;(list||[]).forEach(c=>calls.push(Object.assign({seed:7,people:2},c)));
