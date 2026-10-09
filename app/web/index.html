@@ -739,7 +739,10 @@
   const NOTE_RERUN="Tap a voice's wave to adjust it. Changes re-read the audio — your names stay.";
   const NOTE_FREE="Tap a voice's wave to adjust it.";
   window.openFix=function(free){stopAllAudio();document.getElementById('fix-note').textContent=free===true?NOTE_FREE:NOTE_RERUN;renderFix();document.getElementById('fix').classList.add('show')};
-  window.closeFix=function(){stopAllAudio();document.getElementById('fix').classList.remove('show')};
+  window.closeFix=function(){stopAllAudio();document.getElementById('fix').classList.remove('show');
+    // Fix-speakers edits currentDetect in place; resync the "… on this call"
+    // screen so renamed / re-selected speakers show through when the sheet closes.
+    if(currentDetect&&currentDetect.people&&document.getElementById('detect-people'))renderDetect(currentDetect);};
   window.pickQuality=function(el,q){document.querySelectorAll('#seg-detect .qpick').forEach(c=>c.classList.remove('sel'));el.classList.add('sel');
     const eta=document.getElementById('qeta');if(eta)eta.textContent=q==='Best'?'~18 min':'~3 min'};
   document.addEventListener('keydown',e=>{if(e.key==='Escape')closeFix()});

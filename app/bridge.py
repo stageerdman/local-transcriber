@@ -223,6 +223,7 @@ class Bridge:
         return {
             "id": job.id, "name": path.stem, "source": str(path),
             "dur": _fmt_duration(job.audio_duration_seconds),
+            "dur_secs": float(job.audio_duration_seconds or 0.0),
             "people": people, "setaside": set_aside, "status": "ready",
         }
 
