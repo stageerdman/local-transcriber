@@ -1,3 +1,4 @@
+import io
 import threading
 import time
 from pathlib import Path
@@ -11,6 +12,10 @@ class FakeProcess:
         self.cmd = cmd
         self._done = threading.Event()
         self.terminated = False
+        # The watcher reads ffplay's status line off stderr; an immediate-EOF
+        # stream mirrors "no status reported yet", so position() falls back to
+        # the wall clock (what test_position_tracks_from_seek_point asserts).
+        self.stderr = io.BytesIO(b"")
 
     def wait(self):
         self._done.wait(timeout=5)
