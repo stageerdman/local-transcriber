@@ -71,3 +71,40 @@ def test_parakeet_without_callback_still_works(monkeypatch):
     segments = transcribe_mp3_segments("mlx-community/parakeet-tdt-0.6b-v3", "unused.mp3")
 
     assert [s.text for s in segments] == ["hello"]
+
+
+def test_whisper_vad_progress_tracks_chunk_samples(monkeypatch):
+    """Whisper VAD progress must advance by each chunk's SAMPLE span, not by the
+    word-level seconds of its last segment. Regression guard: `_seg_times`
+    returns seconds, and shadowing the loop's sample-span `start`/`end` with it
+    pinned the fraction (done_speech seconds / total_speech samples) at ~0."""
+    # Two 10s speech chunks @ 16 kHz -> 160000 samples each, 320000 total.
+    chunks = [(0, 160000), (160000, 320000)]
+    monkeypatch.setattr(transcription, "_speech_chunks", lambda audio: chunks)
+    monkeypatch.setattr(transcription, "ensure_mlx_whisper_available", lambda: None)
+
+    # Each decode yields one short segment: word times are small (~seconds),
+    # which is exactly what used to leak into the progress denominator.
+    def fake_transcribe(audio, **kwargs):
+        return {"segments": [{"text": "hi", "start": 0.0, "end": 1.0,
+                              "words": [{"start": 0.0, "end": 1.0}]}]}
+
+    import sys
+    import types
+
+    fake_mlx = types.ModuleType("mlx_whisper")
+    fake_mlx.transcribe = fake_transcribe
+    fake_audio = types.ModuleType("mlx_whisper.audio")
+    fake_audio.load_audio = lambda path: list(range(320000))  # sliceable stand-in
+    monkeypatch.setitem(sys.modules, "mlx_whisper", fake_mlx)
+    monkeypatch.setitem(sys.modules, "mlx_whisper.audio", fake_audio)
+
+    fractions = []
+    transcribe_mp3_segments(
+        "mlx-community/whisper-small",
+        "unused.mp3",
+        progress_callback=fractions.append,
+        use_vad=True,
+    )
+
+    assert fractions == [0.5, 1.0]

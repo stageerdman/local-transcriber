@@ -275,10 +275,10 @@ def _transcribe_whisper_vad(
         for seg in result.get("segments", []):
             text = seg.get("text", "").strip()
             if text:
-                start, end = _seg_times(seg)
+                seg_start, seg_end = _seg_times(seg)
                 segments.append(TranscribedSegment(
-                    start=offset + start,
-                    end=offset + end,
+                    start=offset + seg_start,
+                    end=offset + seg_end,
                     text=text,
                 ))
         done_speech += end - start
