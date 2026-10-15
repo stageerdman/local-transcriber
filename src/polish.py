@@ -33,7 +33,8 @@ import os
 import shutil
 import subprocess
 import unicodedata
-from typing import Callable
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Callable, TypeVar
 
 ProgressCallback = Callable[[float], None]
 
@@ -48,6 +49,11 @@ _BLOCK_BATCH = 5
 # Plain single-speaker passages are still split only when very large.
 _CHUNK_CHARS = 6000
 _CALL_TIMEOUT = 180  # seconds per claude call
+# Groups/chunks are independent, so we run a few `claude` calls at once instead
+# of strictly one-at-a-time. Kept deliberately low: enough to cut wall-clock on
+# long transcripts, low enough not to spawn a burst of processes or hammer the
+# API. Override with TRANSCRIBER_POLISH_CONCURRENCY (clamped to >= 1).
+_DEFAULT_CONCURRENCY = 3
 _LENGTH_TRIPWIRE = 1.4
 _CONTAINMENT_MIN = 0.6  # >= this fraction of output words must exist in the input
 _CONTAINMENT_MIN_WORDS = 6  # below this, output is too short to measure -> trust it
@@ -132,6 +138,46 @@ def _run_claude(prompt: str) -> str | None:
     return out or None
 
 
+# --- bounded parallelism -----------------------------------------------------
+
+_T = TypeVar("_T")
+
+
+def _concurrency() -> int:
+    """Max simultaneous `claude` calls; env-overridable, never below 1."""
+    try:
+        return max(1, int(os.environ.get("TRANSCRIBER_POLISH_CONCURRENCY", "")))
+    except ValueError:
+        return _DEFAULT_CONCURRENCY
+
+
+def _map_parallel(
+    items: list[_T],
+    worker: Callable[[_T], _T],
+    progress_callback: ProgressCallback | None,
+) -> list[_T]:
+    """Run `worker` over `items` with bounded concurrency, returning results in
+    the SAME order as the input. Progress fires as each call finishes (so it may
+    advance out of order) - count-based, not position-based. Workers are the
+    existing polish helpers, which already swallow failures to the raw text, so
+    nothing here raises in normal operation."""
+    n = len(items)
+    if n == 0:
+        if progress_callback is not None:
+            progress_callback(1.0)
+        return []
+    results: list[_T | None] = [None] * n
+    done = 0
+    with ThreadPoolExecutor(max_workers=min(_concurrency(), n)) as pool:
+        futures = {pool.submit(worker, item): i for i, item in enumerate(items)}
+        for fut in as_completed(futures):
+            results[futures[fut]] = fut.result()
+            done += 1
+            if progress_callback is not None:
+                progress_callback(done / n)
+    return results  # type: ignore[return-value]  # every slot is filled above
+
+
 # --- safety guards -----------------------------------------------------------
 
 def _strip_fences(text: str) -> str:
@@ -211,12 +257,11 @@ def polish_text(
     if len(text) < _MIN_POLISH_CHARS:
         return text
     chunks = _chunk_by_lines(text)
-    out = []
-    for i, chunk in enumerate(chunks):
-        reply = _run_claude(TEXT_INSTRUCTION + chunk)
-        out.append(_accept(chunk, reply))
-        if progress_callback is not None:
-            progress_callback((i + 1) / len(chunks))
+    out = _map_parallel(
+        chunks,
+        lambda chunk: _accept(chunk, _run_claude(TEXT_INSTRUCTION + chunk)),
+        progress_callback,
+    )
     return "\n\n".join(out)
 
 
@@ -259,11 +304,8 @@ def polish_blocks(
     groups = [
         stripped[i : i + _BLOCK_BATCH] for i in range(0, len(stripped), _BLOCK_BATCH)
     ]
+    polished = _map_parallel(groups, _polish_block_group, progress_callback)
     out: list[str] = []
-    for i, group in enumerate(groups):
-        out.extend(_polish_block_group(group))
-        if progress_callback is not None:
-            progress_callback((i + 1) / len(groups))
-    if progress_callback is not None and not groups:
-        progress_callback(1.0)
+    for group in polished:
+        out.extend(group)
     return out

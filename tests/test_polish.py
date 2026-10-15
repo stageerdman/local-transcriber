@@ -2,6 +2,7 @@ from src import polish
 from src.polish import (
     _accept,
     _chunk_by_lines,
+    _concurrency,
     _containment_ok,
     _strip_fences,
     polish_blocks,
@@ -86,6 +87,29 @@ def test_polish_blocks_skips_cli_when_all_turns_are_short(monkeypatch) -> None:
 
     monkeypatch.setattr(polish, "_run_claude", _boom)
     assert polish_blocks(["Jo.", "Mhm", "Ne."]) == ["Jo.", "Mhm", "Ne."]
+
+
+def test_polish_blocks_preserves_order_across_concurrent_groups(monkeypatch) -> None:
+    # More than _BLOCK_BATCH blocks -> multiple groups run on the thread pool.
+    # The fake echoes each group's own JSON back, so if any group's result landed
+    # in the wrong slot the final order would break. Distinct words per block.
+    def echo_group(prompt):
+        return prompt.split("JSON:\n", 1)[1]
+
+    monkeypatch.setattr(polish, "_run_claude", echo_group)
+    raw = [f"replika cislo {i} s dostatkem slov pro polishing" for i in range(13)]
+    assert polish_blocks(raw) == raw
+
+
+def test_concurrency_env_override(monkeypatch) -> None:
+    monkeypatch.setenv("TRANSCRIBER_POLISH_CONCURRENCY", "7")
+    assert _concurrency() == 7
+    monkeypatch.setenv("TRANSCRIBER_POLISH_CONCURRENCY", "0")
+    assert _concurrency() == 1  # clamped to at least 1
+    monkeypatch.setenv("TRANSCRIBER_POLISH_CONCURRENCY", "nonsense")
+    assert _concurrency() == polish._DEFAULT_CONCURRENCY
+    monkeypatch.delenv("TRANSCRIBER_POLISH_CONCURRENCY", raising=False)
+    assert _concurrency() == polish._DEFAULT_CONCURRENCY
 
 
 def test_polish_blocks_per_block_guard_falls_back(monkeypatch) -> None:
