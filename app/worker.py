@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import multiprocessing
 import queue
-import shutil
 import sqlite3
-import tempfile
 import threading
 import time
 from datetime import datetime
@@ -13,7 +11,7 @@ from typing import Callable
 
 from app.engine import run_engine
 from app.jobs import Job, WorkerEvent
-from src import catalog, dialogue, history_db, md_writer
+from src import catalog, dialogue, history_db, job_store, md_writer
 from src.audio_tracks import (
     AudioStream,
     safe_probe_audio_streams,
@@ -81,6 +79,15 @@ class TranscriptionWorker(threading.Thread):
         self.request_queue: multiprocessing.Queue | None = None
         self.response_queue: multiprocessing.Queue | None = None
 
+        # Checkpoint of the job currently being processed, and the audio "unit"
+        # (one engine call) in flight - set so `_await_engine_result` can persist
+        # streamed chunks under the right unit with the right speaker/energy.
+        self._cp: job_store.Checkpoint | None = None
+        self._unit: str | None = None
+        self._unit_speaker: str | None = None
+        self._unit_track_pcm = None
+        self._unit_track_rms: float = 0.0
+
     def run(self) -> None:
         while True:
             job = self.job_queue.get()
@@ -113,29 +120,104 @@ class TranscriptionWorker(threading.Thread):
                 self.engine_process.join(timeout=2)
         self.engine_process = None
 
-    def _transcribe_via_engine(
+    def _transcribe_unit(
         self,
         job: Job,
-        mp3_path: Path,
+        unit: str,
+        audio_path: Path,
         on_progress: "Callable[[float], None] | None" = None,
+        *,
+        speaker: str | None = None,
+        track_pcm=None,
+        track_rms: float = 0.0,
         language: str | None = SENTINEL,  # type: ignore[assignment]
-    ) -> list[TranscribedSegment]:
-        """Transcribe one audio file via the engine process.
+    ) -> list:
+        """Transcribe one audio file ("unit") via the engine, resumably.
 
-        `on_progress` receives a fraction in [0, 1] of *this file* processed so
-        far, as the engine reports it. Callers translate that into the job's
-        overall bar value (identity for single-track; (done + frac)/N for
-        multi-track).
+        A *unit* is "single" for a single-track job or "track<index>" per
+        selected stream for multi-track. The engine streams each completed chunk
+        back; `_await_engine_result` persists them to the segment log tagged with
+        this unit (and `speaker`/`energy` for multi-track). On resume it skips the
+        chunks already persisted and the segments come back from the log, so the
+        result is identical whether or not the unit was interrupted.
 
-        `language` overrides the job's global language for this one call (used
-        for per-track language in multi-track jobs); left as the sentinel, it
-        falls back to `job.language`.
+        Returns `TranscribedSegment`s when `speaker is None` (single-track), or
+        `dialogue.Segment`s (speaker-labeled, with energy) otherwise.
+
+        `on_progress` receives a fraction in [0, 1] of *this unit* processed so
+        far. `language` overrides the job's global language (per-track); the
+        sentinel falls back to `job.language`.
         """
-        if language is SENTINEL:
-            language = job.language
-        self._ensure_engine_running()
-        self.request_queue.put(("transcribe", job.id, job.model, mp3_path, language, True))
-        return self._await_engine_result(job, on_progress)
+        cp = self._cp
+        self._unit = unit
+        self._unit_speaker = speaker
+        self._unit_track_pcm = track_pcm
+        self._unit_track_rms = track_rms
+
+        if unit not in cp.completed_units:
+            start_chunk = cp.partial_done_chunks if cp.partial_unit == unit else 0
+            if cp.partial_unit != unit:
+                cp.partial_unit = unit
+                cp.partial_done_chunks = 0
+                job_store.save(cp)
+            if language is SENTINEL:
+                language = job.language
+            self._ensure_engine_running()
+            self.request_queue.put(
+                ("transcribe", job.id, job.model, audio_path, language, True, start_chunk)
+            )
+            self._await_engine_result(job, on_progress)  # persists chunks as they stream in
+            self._finish_unit(unit)
+
+        self._unit = None
+        return self._restore_unit(unit, speaker)
+
+    # -- checkpoint persistence of streamed chunks ----------------------------
+
+    def _persist_chunk(self, unit: str, chunk_index: int, segments: list) -> None:
+        """Durably record one completed chunk, then advance the committed counter.
+
+        Segments arrive as `TranscribedSegment`s; we attach the unit's speaker
+        and (multi-track) per-segment energy here, where the track PCM is on
+        hand, so a restored segment is byte-for-byte what a fresh run produces.
+        Segments are written (and fsync'd) BEFORE the counter bump so a crash in
+        between leaves them as harmless stale lines, not committed duplicates."""
+        cp = self._cp
+        rows = []
+        for seg in segments:
+            row = {"start": seg.start, "end": seg.end, "text": seg.text}
+            if self._unit_speaker is not None:
+                row["speaker"] = self._unit_speaker
+            if self._unit_track_pcm is not None:
+                row["energy"] = _segment_energy(
+                    self._unit_track_pcm, seg.start, seg.end, self._unit_track_rms
+                )
+            rows.append(row)
+        job_store.append_segments(cp.key, unit, chunk_index, rows)
+        cp.partial_unit = unit
+        cp.partial_done_chunks = chunk_index + 1
+        job_store.save(cp)
+
+    def _finish_unit(self, unit: str) -> None:
+        cp = self._cp
+        if unit not in cp.completed_units:
+            cp.completed_units.append(unit)
+        cp.partial_unit = None
+        cp.partial_done_chunks = 0
+        job_store.save(cp)
+
+    def _restore_unit(self, unit: str, speaker: str | None) -> list:
+        """Rebuild a unit's segment objects from the persisted log."""
+        rows = job_store.segments_for_unit(self._cp, unit)
+        if speaker is None:
+            return [TranscribedSegment(start=r["start"], end=r["end"], text=r["text"]) for r in rows]
+        return [
+            dialogue.Segment(
+                speaker=r.get("speaker") or speaker,
+                start=r["start"], end=r["end"], text=r["text"], energy=r.get("energy"),
+            )
+            for r in rows
+        ]
 
     def _polish_via_engine(self, job: Job, payload, is_blocks: bool):
         """Run the LLM cleanup pass (Claude CLI) via the engine process.
@@ -150,6 +232,7 @@ class TranscriptionWorker(threading.Thread):
         transcription-end bar value. We just mark when polishing started.
         """
         self._ensure_engine_running()
+        self._unit = None  # polish streams no chunks; don't persist anything
         job.polish_started_at = datetime.now()
         job.status_detail = None  # drop any "track N/M" detail from transcription
         self.request_queue.put(("polish", job.id, payload, is_blocks))
@@ -174,6 +257,11 @@ class TranscriptionWorker(threading.Thread):
             elif kind == "progress":
                 if on_progress is not None:
                     on_progress(float(message[2]))
+            elif kind == "chunk":
+                # One transcription chunk finished - persist it immediately so a
+                # stop/crash after this point keeps its work.
+                _, _, chunk_index, segments = message
+                self._persist_chunk(self._unit, int(chunk_index), segments)
             elif kind == "result":
                 return message[2]
             elif kind == "error":
@@ -187,7 +275,27 @@ class TranscriptionWorker(threading.Thread):
         job.transcribe_fraction = None
         job.transcribe_position_fraction = None
         start_monotonic = time.monotonic()
-        temp_dir: Path | None = None
+
+        # Load an existing checkpoint (this job was interrupted and is being
+        # resumed) or start a fresh one. Either way the checkpoint goes
+        # "running" and its work dir survives a stop/crash; only a clean finish
+        # or an unrecoverable error removes it.
+        cp = job_store.load(job.key)
+        resuming = cp is not None and cp.status in job_store.RESUMABLE_STATUSES
+        if resuming:
+            job_store.compact(cp)  # drop any stale uncommitted trailing segments
+            cp.status = "running"
+        else:
+            cp = job_store.Checkpoint(
+                key=job.key,
+                config=job_store.serialize_config(job),
+                status="running",
+                phase="queued",
+                started_at=started_at.isoformat(timespec="seconds"),
+            )
+        self._cp = cp
+        job_store.save(cp)
+        work_dir = job_store.ensure_work_dir(job.key)
 
         try:
             if job.stop_event.is_set():
@@ -229,7 +337,6 @@ class TranscriptionWorker(threading.Thread):
             else:
                 selected_streams = streams
             container_has_multiple_streams = len(streams) > 1
-            temp_dir = Path(tempfile.mkdtemp(prefix="local-transcriber-"))
 
             if container_has_multiple_streams:
                 # Auto-apply speaker separation unless the user configured it
@@ -237,6 +344,7 @@ class TranscriptionWorker(threading.Thread):
                 # doubling case; this subtracts/drops redundant tracks by default
                 # so a plain Start is clean, no manual UI step. (The text-level
                 # echo filter after merge is the backstop for whatever survives.)
+                # Skipped on resume: the resolved plan is already in the config.
                 if len(selected_streams) > 1:
                     selected_streams = self._auto_apply_separation(
                         job, selected_streams, job.audio_duration_seconds
@@ -246,7 +354,7 @@ class TranscriptionWorker(threading.Thread):
                 # the container's total track count.
                 if job.estimated_seconds:
                     job.estimated_seconds *= len(selected_streams)
-                labeled_segments = self._transcribe_multi_track(job, streams, selected_streams, temp_dir)
+                labeled_segments = self._transcribe_multi_track(job, streams, selected_streams, work_dir)
                 blocks = dialogue.merge_segments_into_blocks(labeled_segments)
                 # Mic-bleed safety net: a voice that leaked onto a second track
                 # gets transcribed twice, under two speakers. Drop the quiet echo
@@ -276,10 +384,13 @@ class TranscriptionWorker(threading.Thread):
                 if job.source_path.suffix.lower() == ".mp3":
                     mp3_path = job.source_path
                 else:
-                    job.status = "converting"
-                    self._emit(job)
-                    mp3_path = temp_dir / f"{job.source_path.stem}.mp3"
-                    prepare_mp3(job.source_path, mp3_path)
+                    mp3_path = work_dir / f"{job.source_path.stem}.mp3"
+                    # Reuse a conversion from a prior run; only re-encode if it's
+                    # not already sitting in the (durable) work dir.
+                    if not mp3_path.exists():
+                        job.status = "converting"
+                        self._emit(job)
+                        prepare_mp3(job.source_path, mp3_path)
 
                 if job.stop_event.is_set():
                     raise _StopRequested()
@@ -292,7 +403,9 @@ class TranscriptionWorker(threading.Thread):
                     job.transcribe_position_fraction = fraction
                     self._emit(job)
 
-                segments = self._transcribe_via_engine(job, mp3_path, on_progress)
+                segments = self._transcribe_unit(
+                    job, job_store.SINGLE_UNIT, mp3_path, on_progress, speaker=None
+                )
                 text = " ".join(seg.text for seg in segments).strip()
                 raw_transcript_text = text + ("\n" if text else "")
                 if job.polish and text:
@@ -323,11 +436,19 @@ class TranscriptionWorker(threading.Thread):
             job.status = "done"
             job.status_detail = None
             self._record_history(job, status="success", elapsed_seconds=elapsed_seconds, started_at=started_at)
+            # Clean finish: the transcript is written, so the checkpoint and its
+            # artifacts have served their purpose.
+            job_store.discard(job.key)
         except _StopRequested:
+            # Clean stop within a session: keep the checkpoint as "paused" so the
+            # job can be resumed (automatically on next launch, or via Resume).
             elapsed_seconds = time.monotonic() - start_monotonic
             job.elapsed_seconds = elapsed_seconds
             job.status = "stopped"
             job.status_detail = None
+            cp.status = "paused"
+            cp.phase = "transcribing"
+            job_store.save(cp)
             self._record_history(job, status="stopped", elapsed_seconds=elapsed_seconds, started_at=started_at)
         except Exception as exc:  # noqa: BLE001 - surfaced to the UI, not swallowed
             elapsed_seconds = time.monotonic() - start_monotonic
@@ -335,12 +456,14 @@ class TranscriptionWorker(threading.Thread):
             job.status = "error"
             job.status_detail = None
             job.error = f"{type(exc).__name__}: {exc}"
+            # A real error would just re-fail on resume, so don't keep the job
+            # around to be auto-resumed; drop its work dir.
+            job_store.discard(job.key)
             self._record_history(
                 job, status="error", elapsed_seconds=elapsed_seconds, started_at=started_at, error=job.error
             )
         finally:
-            if temp_dir is not None:
-                shutil.rmtree(temp_dir, ignore_errors=True)
+            self._cp = None
             self._emit(job)
 
     def _auto_apply_separation(
@@ -353,8 +476,16 @@ class TranscriptionWorker(threading.Thread):
         already configured subtractions (their choice wins), when detection finds
         nothing to fix, or on any detection failure - the post-merge echo filter
         is the backstop either way. Never drops the last remaining track.
+
+        On resume `job.separation_done` is already set (the resolved plan was
+        baked into the checkpoint config), so this no-ops and we never re-run the
+        best-effort detection - which could decide differently and desync from
+        the segments already saved under the old plan.
         """
+        if job.separation_done:  # resolved in a prior run; use the saved plan
+            return selected_streams
         if job.track_subtractions:  # user override (or UI "Fix automatically")
+            self._mark_separation_resolved(job, selected_streams)
             return selected_streams
 
         warnings = job.shared_voice_warnings
@@ -363,6 +494,7 @@ class TranscriptionWorker(threading.Thread):
         selected_indices = [s.index for s in selected_streams]
         subtractions, drop = track_separation.resolve_shared_voice(selected_indices, warnings)
         if not subtractions and not drop:
+            self._mark_separation_resolved(job, selected_streams)
             return selected_streams
 
         job.status = "separating speakers"
@@ -370,7 +502,18 @@ class TranscriptionWorker(threading.Thread):
         self._emit(job)
         job.track_subtractions = subtractions
         kept = [s for s in selected_streams if s.index not in drop]
-        return kept or selected_streams
+        kept = kept or selected_streams
+        self._mark_separation_resolved(job, kept)
+        return kept
+
+    def _mark_separation_resolved(self, job: Job, kept: list[AudioStream]) -> None:
+        """Freeze the resolved separation plan into the checkpoint for resume."""
+        job.separation_done = True
+        job.selected_track_indices = {s.index for s in kept}
+        if self._cp is not None:
+            self._cp.config = job_store.serialize_config(job)
+            self._cp.multi_track = True
+            job_store.save(self._cp)
 
     def _detect_shared_voice(
         self, source: Path, streams: list[AudioStream], duration: float | None
@@ -400,7 +543,7 @@ class TranscriptionWorker(threading.Thread):
         job: Job,
         all_streams: list[AudioStream],
         streams_to_transcribe: list[AudioStream],
-        temp_dir: Path,
+        work_dir: Path,
     ) -> list[dialogue.Segment]:
         # Default labels come from the container's full track list so a track's
         # name stays stable regardless of which subset got selected; the user's
@@ -411,15 +554,19 @@ class TranscriptionWorker(threading.Thread):
         denoise_flags = job.track_denoise or {}
         subtractions = job.track_subtractions or {}
         channels = job.selected_channel_by_track or {}
+        cp = self._cp
 
         def label_for(index: int) -> str:
             return names.get(index) or default_names.get(index, f"Speaker {index}")
 
-        # Decode every track we'll need: the ones to transcribe plus any track
-        # used only as a subtraction reference. Tracks share the container's
-        # timeline, so PCM decoded here is already sample-aligned.
-        needed: set[int] = {s.index for s in streams_to_transcribe}
-        for s in streams_to_transcribe:
+        # Decode only the PCM still needed: tracks not yet completed, plus any
+        # track used as a subtraction reference by one of those. A track finished
+        # in a prior run is restored from the segment log, so it needs no PCM.
+        # Tracks share the container's timeline, so PCM decoded here is already
+        # sample-aligned.
+        pending = [s for s in streams_to_transcribe if job_store.track_unit(s.index) not in cp.completed_units]
+        needed: set[int] = {s.index for s in pending}
+        for s in pending:
             needed.update(subtractions.get(s.index, []))
         pcm: dict[int, object] = {}
         for index in needed:
@@ -434,6 +581,16 @@ class TranscriptionWorker(threading.Thread):
 
         for i, stream in enumerate(streams_to_transcribe):
             name = label_for(stream.index)
+            unit = job_store.track_unit(stream.index)
+
+            # Already transcribed in a prior run: pull its labeled segments
+            # straight from the log and advance the overall bar.
+            if unit in cp.completed_units:
+                labeled_segments.extend(self._restore_unit(unit, name))
+                job.transcribe_fraction = (i + 1) / total
+                self._emit(job)
+                continue
+
             if job.stop_event.is_set():
                 raise _StopRequested()
 
@@ -443,10 +600,13 @@ class TranscriptionWorker(threading.Thread):
 
             refs = [pcm[r] for r in subtractions.get(stream.index, []) if r in pcm]
             denoise = denoise_flags.get(stream.index, True)
-            track_wav = temp_dir / f"track{i}.wav"
-            track_separation.render_transcription_wav(
-                pcm[stream.index], refs, track_wav, denoise=denoise
-            )
+            # Track wavs are keyed by stream index (stable across runs) and kept
+            # in the durable work dir, so a resumed job reuses the rendered wav.
+            track_wav = work_dir / f"{unit}.wav"
+            if not track_wav.exists():
+                track_separation.render_transcription_wav(
+                    pcm[stream.index], refs, track_wav, denoise=denoise
+                )
 
             if job.stop_event.is_set():
                 raise _StopRequested()
@@ -462,15 +622,13 @@ class TranscriptionWorker(threading.Thread):
                 self._emit(job)
 
             language = languages.get(stream.index) or job.language
-            segments = self._transcribe_via_engine(job, track_wav, on_progress, language=language)
             track_pcm = pcm[stream.index]
-            track_rms = _track_rms(track_pcm)
             labeled_segments.extend(
-                dialogue.Segment(
-                    speaker=name, start=seg.start, end=seg.end, text=seg.text,
-                    energy=_segment_energy(track_pcm, seg.start, seg.end, track_rms),
+                self._transcribe_unit(
+                    job, unit, track_wav, on_progress,
+                    speaker=name, track_pcm=track_pcm, track_rms=_track_rms(track_pcm),
+                    language=language,
                 )
-                for seg in segments
             )
 
         return labeled_segments

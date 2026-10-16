@@ -105,6 +105,12 @@ class Job:
     # Per-track voice subtraction: index -> list of other AudioStream.index
     # values whose voice should be removed from this track before transcribing.
     track_subtractions: dict[int, list[int]] | None = None
+    # Set once speaker-separation has been resolved (auto-detected or
+    # user-configured) and baked into `selected_track_indices` /
+    # `track_subtractions`. Persisted in the checkpoint so a resumed job uses the
+    # already-resolved plan instead of re-running best-effort shared-voice
+    # detection (which could decide differently and desync from saved segments).
+    separation_done: bool = False
 
     # --- shared-voice safety net (see src.track_separation.detect_shared_voice)
     # Populated by an async PCM analysis after the tracks load: pairs of tracks

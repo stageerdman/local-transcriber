@@ -18,9 +18,8 @@ import pytest
 
 from app.jobs import Job
 from app.worker import SENTINEL, TranscriptionWorker
-from src import dialogue
+from src import dialogue, job_store
 from src.audio_tracks import extract_track_to_mp3, probe_audio_streams, track_speaker_names
-from src.transcription import TranscribedSegment
 
 pytestmark = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
 
@@ -49,17 +48,20 @@ def test_multitrack_applies_names_language_and_subtraction(tmp_path: Path, monke
     streams = probe_audio_streams(media)
     assert len(streams) == 3
 
+    monkeypatch.setenv("LOCAL_TRANSCRIBER_STATE_DIR", str(tmp_path / "state"))
     worker = TranscriptionWorker(queue.Queue(), queue.Queue(), db_conn=None)  # type: ignore[arg-type]
+    worker._cp = job_store.Checkpoint(key="itest", config={}, status="running")
 
     calls: list[tuple[str, object]] = []
 
-    def fake_engine(job, audio_path, on_progress=None, language=SENTINEL):  # noqa: ANN001
+    def fake_unit(job, unit, audio_path, on_progress=None, *, speaker=None,  # noqa: ANN001
+                  track_pcm=None, track_rms=0.0, language=SENTINEL):
         calls.append((Path(audio_path).stem, language))
         if on_progress is not None:
             on_progress(1.0)
-        return [TranscribedSegment(start=0.0, end=1.0, text=f"said-{Path(audio_path).stem}")]
+        return [dialogue.Segment(speaker=speaker, start=0.0, end=1.0, text=f"said-{speaker}")]
 
-    monkeypatch.setattr(worker, "_transcribe_via_engine", fake_engine)
+    monkeypatch.setattr(worker, "_transcribe_unit", fake_unit)
 
     a, b, c = streams[0].index, streams[1].index, streams[2].index
     job = Job(

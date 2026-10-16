@@ -314,3 +314,25 @@ def read_segments(checkpoint: Checkpoint) -> list[dict]:
 def segments_for_unit(checkpoint: Checkpoint, unit: str) -> list[dict]:
     """Committed segments belonging to one unit, in log order."""
     return [s for s in read_segments(checkpoint) if s.get("unit") == unit]
+
+
+def compact(checkpoint: Checkpoint) -> None:
+    """Rewrite the segment log to exactly its committed lines.
+
+    Call once when resuming, before appending anything new. It drops the stale
+    trailing lines a crash may have left (uncommitted chunks of the partial
+    unit). Without this, re-running that chunk would append a *second* copy, and
+    once the unit later lands in `completed_units` - where every line is kept -
+    both copies would survive as duplicates.
+    """
+    path = _segments_path(checkpoint.key)
+    if not path.exists():
+        return
+    kept = read_segments(checkpoint)
+    tmp = path.with_suffix(".jsonl.tmp")
+    with open(tmp, "w", encoding="utf-8") as fh:
+        for line in kept:
+            fh.write(json.dumps(line, ensure_ascii=False) + "\n")
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)

@@ -18,9 +18,11 @@ def run_engine(request_queue: "Queue", response_queue: "Queue") -> None:
     killed (and respawned fresh) when the user stops a job mid-run.
 
     Requests are tagged tuples:
-      ("transcribe", job_id, model_name, audio_path, language, use_vad)
+      ("transcribe", job_id, model_name, audio_path, language, use_vad, start_chunk)
       ("polish",     job_id, payload, is_blocks)
-    Both reply with ("phase"|"progress"|"result"|"error", job_id, ...).
+    Transcribe replies stream ("chunk", job_id, chunk_index, segments) as each
+    chunk finishes (so the worker can persist it before any kill), then a final
+    ("result", job_id, n_segments). Both also emit ("phase"|"progress"|"error").
     """
     while True:
         request = request_queue.get()
@@ -29,7 +31,7 @@ def run_engine(request_queue: "Queue", response_queue: "Queue") -> None:
 
         kind = request[0]
         if kind == "transcribe":
-            _, job_id, model_name, audio_path, language, use_vad = request
+            _, job_id, model_name, audio_path, language, use_vad, start_chunk = request
             try:
                 ensure_model_loaded(model_name)
                 response_queue.put(("phase", job_id, "transcribing"))
@@ -39,8 +41,10 @@ def run_engine(request_queue: "Queue", response_queue: "Queue") -> None:
                     language=language,
                     progress_callback=lambda fraction: response_queue.put(("progress", job_id, fraction)),
                     use_vad=use_vad,
+                    chunk_sink=lambda idx, segs: response_queue.put(("chunk", job_id, idx, segs)),
+                    start_chunk=start_chunk,
                 )
-                response_queue.put(("result", job_id, segments))
+                response_queue.put(("result", job_id, len(segments)))
             except Exception as exc:  # noqa: BLE001 - reported back, not swallowed
                 response_queue.put(("error", job_id, type(exc).__name__, str(exc)))
 

@@ -8,6 +8,13 @@ from typing import Any, Callable
 # so far. Not every backend can report it (see `transcribe_mp3_segments`).
 ProgressCallback = Callable[[float], None]
 
+# Called once per completed chunk with (chunk_index, that chunk's segments). It
+# is how resumable transcription persists finished work *as it happens*, so a
+# stop/crash mid-file only loses the in-flight chunk. Whisper fires it per VAD
+# speech region (frame-accurate, resumable mid-file); Parakeet fires it once for
+# the whole file (chunk 0), since its chunking is internal and opaque.
+ChunkSink = Callable[[int, "list[TranscribedSegment]"], None]
+
 
 @dataclass
 class TranscribedSegment:
@@ -149,6 +156,8 @@ def transcribe_mp3_segments(
     language: str | None = None,
     progress_callback: ProgressCallback | None = None,
     use_vad: bool = True,
+    chunk_sink: ChunkSink | None = None,
+    start_chunk: int = 0,
 ) -> list[TranscribedSegment]:
     """Transcribe, keeping per-segment/sentence timestamps.
 
@@ -166,18 +175,33 @@ def transcribe_mp3_segments(
     quiet stretches and the subtraction-residual tracks from mic-bleed removal,
     Whisper otherwise invents boilerplate ("Titulky vytvořil...") or loops.
     Parakeet has no such failure mode and ignores this flag.
+
+    `chunk_sink`/`start_chunk` power resumable transcription. `chunk_sink` is
+    called with each completed chunk's segments as it finishes (so the caller
+    can persist them immediately). `start_chunk` skips that many leading chunks -
+    on resume the caller already has them persisted. The VAD chunk list is a
+    deterministic function of the audio, so skipping the first N and keeping the
+    previously-saved N reproduces the full transcript exactly. Only the Whisper
+    VAD path can skip mid-file; Parakeet always runs the whole file (its single
+    chunk 0), so `start_chunk` is a no-op there and the caller re-runs the unit.
+
+    Returns only the segments produced by chunks actually run in *this* call
+    (i.e. from `start_chunk` onward); resumed-over chunks come from the caller's
+    persisted log, not from here.
     """
     if _is_parakeet_model(model_name):
-        return _transcribe_with_parakeet(model_name, audio_path, progress_callback)
+        return _transcribe_with_parakeet(model_name, audio_path, progress_callback, chunk_sink)
 
     repo = _resolve_model(model_name)
     if use_vad:
-        return _transcribe_whisper_vad(repo, audio_path, language, progress_callback)
-    return _transcribe_whisper_plain(repo, audio_path, language)
+        return _transcribe_whisper_vad(
+            repo, audio_path, language, progress_callback, chunk_sink, start_chunk
+        )
+    return _transcribe_whisper_plain(repo, audio_path, language, chunk_sink)
 
 
 def _transcribe_whisper_plain(
-    repo: str, audio_path: Path, language: str | None
+    repo: str, audio_path: Path, language: str | None, chunk_sink: ChunkSink | None = None
 ) -> list[TranscribedSegment]:
     ensure_mlx_whisper_available()
     import mlx_whisper
@@ -195,6 +219,9 @@ def _transcribe_whisper_plain(
         if text:
             start, end = _seg_times(seg)
             segments.append(TranscribedSegment(start=start, end=end, text=text))
+    # The plain path is one un-chunked decode: the whole file is chunk 0.
+    if chunk_sink is not None:
+        chunk_sink(0, segments)
     return segments
 
 
@@ -250,6 +277,8 @@ def _transcribe_whisper_vad(
     audio_path: Path,
     language: str | None,
     progress_callback: ProgressCallback | None,
+    chunk_sink: ChunkSink | None = None,
+    start_chunk: int = 0,
 ) -> list[TranscribedSegment]:
     ensure_mlx_whisper_available()
     import mlx_whisper
@@ -261,9 +290,14 @@ def _transcribe_whisper_vad(
         return []
 
     total_speech = sum(e - s for s, e in chunks) or 1
-    done_speech = 0
+    # On resume, count the skipped chunks as already-done speech so the bar picks
+    # up where it left off instead of jumping back to 0.
+    done_speech = sum(e - s for s, e in chunks[:start_chunk])
+    if start_chunk and progress_callback is not None:
+        progress_callback(min(1.0, done_speech / total_speech))
     segments: list[TranscribedSegment] = []
-    for start, end in chunks:
+    for index in range(start_chunk, len(chunks)):
+        start, end = chunks[index]
         offset = start / _VAD_SAMPLE_RATE
         result = mlx_whisper.transcribe(
             audio[start:end],
@@ -272,15 +306,21 @@ def _transcribe_whisper_vad(
             verbose=False,
             **WHISPER_DECODE_OPTS,
         )
+        chunk_segments: list[TranscribedSegment] = []
         for seg in result.get("segments", []):
             text = seg.get("text", "").strip()
             if text:
                 seg_start, seg_end = _seg_times(seg)
-                segments.append(TranscribedSegment(
+                chunk_segments.append(TranscribedSegment(
                     start=offset + seg_start,
                     end=offset + seg_end,
                     text=text,
                 ))
+        # Hand off this chunk's segments for durable persistence BEFORE moving on,
+        # so a stop/crash after this point keeps the chunk's work.
+        if chunk_sink is not None:
+            chunk_sink(index, chunk_segments)
+        segments.extend(chunk_segments)
         done_speech += end - start
         if progress_callback is not None:
             progress_callback(min(1.0, done_speech / total_speech))
@@ -299,7 +339,10 @@ _PARAKEET_CHUNK_OVERLAP_SECONDS = 15.0
 
 
 def _transcribe_with_parakeet(
-    model_name: str, audio_path: Path, progress_callback: ProgressCallback | None = None
+    model_name: str,
+    audio_path: Path,
+    progress_callback: ProgressCallback | None = None,
+    chunk_sink: ChunkSink | None = None,
 ) -> list[TranscribedSegment]:
     # Parakeet is multilingual and auto-detects the spoken language itself -
     # unlike mlx_whisper.transcribe(), parakeet_mlx's transcribe() takes no
@@ -322,8 +365,13 @@ def _transcribe_with_parakeet(
         overlap_duration=_PARAKEET_CHUNK_OVERLAP_SECONDS,
         chunk_callback=chunk_callback,
     )
-    return [
+    segments = [
         TranscribedSegment(start=float(sentence.start), end=float(sentence.end), text=sentence.text.strip())
         for sentence in result.sentences
         if sentence.text.strip()
     ]
+    # Parakeet's chunking is internal and opaque, so the whole file resumes as a
+    # single unit: emit it all as chunk 0 once the one call returns.
+    if chunk_sink is not None:
+        chunk_sink(0, segments)
+    return segments
