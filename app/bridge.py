@@ -26,7 +26,7 @@ import webview
 
 from app.jobs import Job
 from app.worker import SENTINEL, TranscriptionWorker
-from src import catalog, history_db
+from src import catalog, history_db, job_store
 from src.audio_tracks import safe_probe_audio_streams, track_speaker_names
 from src.duration import probe_duration_seconds
 from src.playback import TrackPlayer
@@ -110,11 +110,16 @@ class Bridge:
         self.event_queue: "queue.Queue[Any]" = queue.Queue()
         self.worker = TranscriptionWorker(self.job_queue, self.event_queue, self.db)
         self.worker.start()
-        self._pending: dict[str, Job] = {}  # detected-but-not-yet-transcribed jobs
+        self._pending: dict[int, Job] = {}  # jobs by id: detected, in-flight, or paused
+        self._resumed: list[Job] = []  # jobs re-queued from disk on this launch
         self._player = TrackPlayer()
         threading.Thread(target=self._drain_events, daemon=True).start()
         import atexit
         atexit.register(self.shutdown)  # never leave ffplay / the engine running
+        # Pick up anything interrupted by a previous quit/crash/reboot and let it
+        # continue from its checkpoint. The UI learns about these via
+        # `resuming_jobs()` once it's ready, then via live job events.
+        self._resume_interrupted_jobs()
 
     def set_window(self, window) -> None:
         self._window = window
@@ -347,9 +352,96 @@ class Bridge:
             cleaned = {int(k): [int(x) for x in v] for k, v in subs.items() if v}
             job.track_subtractions = cleaned or None
         job.status = "queued"
+        self._pending[job.id] = job
         self.job_queue.put(job)
         self._emit("job", {"id": job.id, "status": "queued", "progress": 0})
         return {"id": job.id}
+
+    def stop_job(self, job_id: int) -> dict:
+        """Stop a running/queued job. Its checkpoint is kept, so it can be
+        resumed (via `resume_job`, or automatically on the next launch)."""
+        job = self._pending.get(job_id)
+        if job is None:
+            return {"error": "That job is no longer active."}
+        job.stop_event.set()
+        return {"ok": True}
+
+    def resume_job(self, job_id: int) -> dict:
+        """Re-queue a job that was stopped this session, continuing from its
+        checkpoint. (Jobs interrupted by a quit/crash resume on their own at
+        launch; this is the in-session Resume button.)"""
+        job = self._pending.get(job_id)
+        if job is None:
+            return {"error": "That job is no longer available."}
+        job.stop_event = threading.Event()  # fresh, un-set
+        job.status = "queued"
+        self.job_queue.put(job)
+        self._emit("job", {"id": job.id, "status": "queued",
+                           "progress": int(round((job.transcribe_fraction or 0) * 100))})
+        return {"id": job.id}
+
+    def discard_job(self, job_id: int) -> dict:
+        """Throw away a paused job and its saved partial work for good."""
+        job = self._pending.pop(job_id, None)
+        if job is not None:
+            job.stop_event.set()
+            job_store.discard(job.key)
+        return {"ok": True}
+
+    # -- resume interrupted jobs on launch ------------------------------------
+    def _resume_interrupted_jobs(self) -> None:
+        try:
+            resumable = job_store.list_resumable()
+        except Exception:  # noqa: BLE001 - never let a bad checkpoint block startup
+            resumable = []
+        for cp in resumable:
+            source = (cp.config or {}).get("source_path")
+            if not source or not Path(source).exists():
+                job_store.discard(cp.key)  # source moved/deleted -> unresumable
+                continue
+            try:
+                job = self._job_from_checkpoint(cp)
+            except Exception:  # noqa: BLE001 - skip a checkpoint we can't rebuild
+                job_store.discard(cp.key)
+                continue
+            job.status = "queued"
+            self._pending[job.id] = job
+            self._resumed.append(job)
+            self.job_queue.put(job)
+
+    def _job_from_checkpoint(self, cp: "job_store.Checkpoint") -> Job:
+        cfg = job_store.deserialize_config(cp.config)
+        return Job(
+            source_path=cfg["source_path"],
+            model=cfg["model"],
+            language=cfg["language"],
+            polish=cfg["polish"],
+            key=cp.key,  # same on-disk identity, so the worker finds this checkpoint
+            audio_duration_seconds=cfg.get("audio_duration_seconds"),
+            tracks=cfg.get("tracks"),
+            selected_track_indices=cfg.get("selected_track_indices"),
+            track_names=cfg.get("track_names"),
+            track_languages=cfg.get("track_languages"),
+            track_denoise=cfg.get("track_denoise"),
+            track_subtractions=cfg.get("track_subtractions"),
+            selected_channel_by_track=cfg.get("selected_channel_by_track"),
+            separation_done=cfg.get("separation_done", False),
+        )
+
+    def resuming_jobs(self) -> list[dict]:
+        """Jobs re-queued from disk this launch that are still in flight, so the
+        UI can show them as working the moment it loads (live events follow)."""
+        out = []
+        for job in self._resumed:
+            if job.status in ("done", "error", "stopped"):
+                continue
+            out.append({
+                "id": job.id, "name": job.source_path.stem, "source": str(job.source_path),
+                "status": "working", "resuming": True,
+                "progress": int(round((job.transcribe_fraction or 0) * 100)),
+                "detail": "Resuming…",
+            })
+        return out
 
     # -- worker events → UI ---------------------------------------------------
     def _drain_events(self) -> None:
