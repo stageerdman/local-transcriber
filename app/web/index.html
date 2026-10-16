@@ -133,6 +133,30 @@
   .call-item .ci-name{font-size:13px;font-weight:550;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .call-item .ci-dot{width:6px;height:6px;border-radius:50%;flex:none}
   .call-item .ci-meta{font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+  /* stop / pause / resume controls (working + paused rows are role=group divs) */
+  div.call-item{cursor:default}
+  .call-item .ci-stop{margin-left:auto;flex:none;width:20px;height:20px;border-radius:5px;
+    border:1px solid var(--line);background:var(--surface);color:var(--muted);display:inline-flex;
+    align-items:center;justify-content:center;opacity:0;cursor:pointer;
+    transition:opacity .12s,border-color .12s,color .12s}
+  .call-item.working:hover .ci-stop,.call-item.working:focus-within .ci-stop{opacity:1}
+  .call-item .ci-stop:hover{border-color:var(--accent);color:var(--ink)}
+  .call-item .ci-stop svg{width:8px;height:8px;fill:currentColor}
+  .stat.paused{color:var(--muted)}
+  .call-item .ci-prog.held i{animation:none;background:var(--line-strong)}
+  .call-item .ci-actions{display:flex;gap:8px;align-items:center;margin-top:7px}
+  .ci-act{font-size:11.5px;font-weight:600;padding:4px 11px;border-radius:999px;
+    border:1px solid var(--line);background:var(--surface);color:var(--ink);cursor:pointer;
+    transition:border-color .12s,background .12s,color .12s}
+  .ci-act:hover{border-color:var(--accent)}
+  .ci-act.primary{background:var(--accent);color:var(--accent-ink);border-color:transparent}
+  .ci-act.quiet{border-color:transparent;color:var(--muted);padding-left:4px;padding-right:4px}
+  .ci-act.quiet:hover{color:var(--ink)}
+  .ci-act.danger{border-color:transparent;color:#D9534F}
+  .ci-act.danger:hover{background:rgba(217,83,79,.12)}
+  .call-item .ci-confirm{margin-top:7px;font-size:11.5px;color:var(--muted);display:flex;
+    flex-direction:column;gap:6px}
+  .call-item .ci-confirm-btns{display:flex;gap:6px;align-self:flex-end}
   .dots{display:flex;gap:3px;margin-left:auto}
   .dots i{width:6px;height:6px;border-radius:50%;display:block}
 
@@ -665,13 +689,23 @@
   ];
   function miniBars(seed,n){let h='';for(let i=0;i<n;i++){const v=5+24*(0.3+0.7*rnd(seed+i*2.3));const c=i%2?'var(--spk-b)':'var(--spk-a)';h+=`<i style="height:${v}px;background:${c};opacity:.8"></i>`}return h}
 
+  const STOP_ICON='<svg viewBox="0 0 10 10" aria-hidden="true"><rect width="10" height="10" rx="1.5"/></svg>';
   function renderCalls(){
     document.getElementById('calls').innerHTML=calls.map((c,i)=>{
+      // Working / paused rows carry real action buttons, so they're role=group
+      // containers (not buttons) — a button can't legally nest buttons, and
+      // these rows were never openable anyway.
+      if(c.status==='working'||c.status==='stopping'){
+        const stop=(c.status==='working'&&!c.resuming)
+          ? `<button class="ci-stop" title="Stop (resume later)" aria-label="Stop and save progress" onclick="stopJob(${c.id})">${STOP_ICON}</button>` : '';
+        return `<div class="call-item working" role="group" aria-label="${esc(c.name)} — ${esc(phaseView(c).label)}">
+          <div class="ci-top"><span class="ci-name">${esc(c.name)}</span>${stop}</div>${progHtml(c)}</div>`;
+      }
+      if(c.status==='paused'){ return pausedRow(c); }
       const dots=c.status==='done'
         ? `<span class="dots">${c.people===3?'<i style="background:var(--spk-a)"></i><i style="background:var(--spk-b)"></i><i style="background:#8a8a94"></i>':'<i style="background:var(--spk-a)"></i><i style="background:var(--spk-b)"></i>'}</span>` : '';
       let body='';
-      if(c.status==='working') body=progHtml(c);
-      else if(c.status==='error') body=`<span class="ci-meta stat err">${esc('Couldn’t finish'+(c.err?' — '+c.err:''))}</span>`;
+      if(c.status==='error') body=`<span class="ci-meta stat err">${esc('Couldn’t finish'+(c.err?' — '+c.err:''))}</span>`;
       else if(c.status==='queued') body=`<span class="ci-meta stat queued">Queued</span>`;
       else body=`<span class="ci-meta">${c.when} · ${c.dur} · ${c.people} people</span>`;
       return `<button class="call-item ${c.active?'active':''} ${c.status==='queued'?'is-queued':''}" data-i="${i}"
@@ -679,10 +713,30 @@
         <div class="ci-top"><span class="ci-name">${c.name}</span>${dots}</div>${body}</button>`;
     }).join('');
   }
+  // A stopped job at rest: the bar is held (muted, static) at where it stopped,
+  // with Resume / Discard. Discard is a one-step inline confirm (it's the only
+  // place the loss is stated, since Stop itself keeps the work).
+  function pausedRow(c){
+    const pv=phaseView({...c,status:'transcribing',phase:'transcribing',resuming:false}); // reuse the % + track detail
+    const label='Paused'+(pv.label.includes('·')?pv.label.slice(pv.label.indexOf(' ·')):'');
+    const bar=`<div class="ci-prog held"><i style="width:${Math.max(2,c.prog||0)}%"></i></div>`;
+    const actions=c.confirmDiscard
+      ? `<div class="ci-confirm"><span>Discard this transcription? Progress is lost.</span>
+           <span class="ci-confirm-btns">
+             <button class="ci-act quiet" onclick="keepJob(${c.id})">Keep</button>
+             <button class="ci-act danger" onclick="discardJob(${c.id})">Discard</button></span></div>`
+      : `<div class="ci-actions">
+           <button class="ci-act primary" aria-label="Resume transcription" onclick="resumeJob(${c.id})">Resume</button>
+           <button class="ci-act quiet" onclick="askDiscard(${c.id})">Discard</button></div>`;
+    return `<div class="call-item paused" role="group" aria-label="${esc(c.name)} — ${esc(label)}">
+      <div class="ci-top"><span class="ci-name">${esc(c.name)}</span></div>
+      <span class="ci-meta stat paused">${esc(label)}</span>${bar}${actions}</div>`;
+  }
   function renderCards(){
     const done=calls.filter(c=>c.status==='done');
     document.getElementById('homecards').innerHTML=calls.map((c,i)=>{
-      const meta=c.status==='working'?`<span class="stat working">${esc(phaseView(c).label)}</span>`
+      const meta=(c.status==='working'||c.status==='stopping')?`<span class="stat working">${esc(phaseView(c).label)}</span>`
+        :c.status==='paused'?`<span class="stat paused">Paused · ${Math.round(c.prog||0)}%</span>`
         :c.status==='error'?`<span class="stat err">Couldn’t finish</span>`
         :c.status==='queued'?`<span class="stat queued">Queued</span>`
         :`<span>${c.when} · ${c.dur}</span>`;
@@ -1023,20 +1077,44 @@
     let c=calls.find(x=>x.id===p.id);
     if(!c){c={id:p.id,name:p.name||'Call',status:'working',prog:0,seed:7};calls.unshift(c);}
     if(p.source)c.source=p.source;  // carry the source path so a just-transcribed call is playable without an app restart
-    if(p.status==='done'){c.status='done';c.prog=100;c.phase=null;c.detail=null;c.polishStart=0;c.when='Just now';c.output=p.output;c.transcript=p.transcript;}
-    else if(p.status==='error'){c.status='error';c.phase=null;c.err=p.error;}
-    else {c.status='working';c.phase=p.status;c.detail=p.detail||null;
+    if(p.status==='done'){c.status='done';c.prog=100;c.phase=null;c.detail=null;c.polishStart=0;c.resuming=false;c.confirmDiscard=false;c.when='Just now';c.output=p.output;c.transcript=p.transcript;}
+    else if(p.status==='error'){c.status='error';c.phase=null;c.resuming=false;c.err=p.error;}
+    // A Stop lands here as status "stopped" -> a calm, resumable Paused row.
+    else if(p.status==='stopped'){c.status='paused';c.phase=null;
+      if(typeof p.progress==='number')c.prog=p.progress;}
+    else {c.status='working';c.phase=p.status;c.detail=p.detail||null;c.confirmDiscard=false;
       if(typeof p.progress==='number')c.prog=p.progress;
+      // Hold the "Resuming" verb briefly (min dwell) so it doesn't flicker, then
+      // flip to normal "Transcribing"; the bar never resets.
+      if(c.resuming){ const dwell=1200-(Date.now()-(c.resumeAt||0));
+        if(dwell<=0)c.resuming=false; else setTimeout(()=>{c.resuming=false;renderCalls();renderCards();},dwell); }
       if(p.status==='polishing'){ if(!c.polishStart)c.polishStart=Date.now(); c.polishEta=p.polish_eta||0; startPhaseTicker(); }
       else c.polishStart=0;
     }
     renderCalls();renderCards();
   }
+  // --- stop / resume / discard actions -------------------------------------
+  function callById(id){return calls.find(c=>c.id===id);}
+  window.stopJob=function(id){ const A=api(),c=callById(id); if(c){c.status='stopping';renderCalls();renderCards();} if(A&&A.stop_job)A.stop_job(id); };
+  window.resumeJob=function(id){ const A=api(),c=callById(id);
+    if(c){c.status='working';c.resuming=false;c.confirmDiscard=false;c.phase=null;renderCalls();renderCards();}
+    if(A&&A.resume_job)A.resume_job(id); };
+  window.askDiscard=function(id){ const c=callById(id); if(c){c.confirmDiscard=true;renderCalls();} };
+  window.keepJob=function(id){ const c=callById(id); if(c){c.confirmDiscard=false;renderCalls();} };
+  window.discardJob=function(id){ const A=api(),i=calls.findIndex(c=>c.id===id);
+    if(i>=0)calls.splice(i,1); renderCalls();renderCards(); if(A&&A.discard_job)A.discard_job(id); };
   // Friendly, honest view of a working call's phase. Transcription reports a real
   // %, the surrounding phases don't — those get an active (indeterminate) bar so
   // the app never claims a precise number it doesn't have; polish shows a time tail.
   function phaseView(c){
     if(c.status==='error')return{label:'Couldn’t finish'+(c.err?' — '+c.err:''),mode:'none'};
+    if(c.status==='stopping')return{label:'Stopping…',mode:'indet'};
+    // Resuming on launch: the bar is already live at its checkpoint %, so this is
+    // continuous — only the verb differs, and only until the first live event.
+    if(c.resuming){
+      const t=(c.phase==='transcribing'&&c.detail)?' · '+c.detail:'';
+      return{label:'Resuming · '+Math.round(c.prog||0)+'%'+t,pct:c.prog||0,mode:'bar'};
+    }
     switch(c.phase||c.status){
       case 'queued':return{label:'Queued',mode:'none'};
       case 'separating speakers':return{label:'Separating speakers…',mode:'indet'};
@@ -1088,6 +1166,15 @@
       renderCalls();renderCards();
       if(calls[0]&&calls[0].output)window.openCall(0);
       else window.show('home');
+      // Jobs that were mid-transcription when the app last closed are already
+      // continuing in the background; surface them as in-progress rows (verb
+      // "Resuming" for a beat) so the user sees work being picked up, not lost.
+      if(A.resuming_jobs)A.resuming_jobs().then(jobs=>{
+        (jobs||[]).forEach(r=>{ if(calls.find(c=>c.id===r.id))return;
+          calls.unshift({id:r.id,name:r.name,source:r.source,status:'working',resuming:true,
+            resumeAt:Date.now(),prog:r.progress||0,phase:'transcribing',seed:7,people:2}); });
+        if(jobs&&jobs.length){renderCalls();renderCards();}
+      }).catch(()=>{});
     }).catch(()=>{});
   }
   window.addEventListener('pywebviewready',initBridge);

@@ -99,14 +99,27 @@ during polish resumes straight to re-polish + write.
   bridge gets `stop_job` / `resume_job` / `discard_job`; the payload carries
   paused/resumable state; `app/web/index.html` grows a Stop control on a working
   call, a Paused + Resume state, and a "resuming…" cue on launch. _Verify in the
-  real app._  **STATUS: not started**
+  real app._  **STATUS: done**
 
 - **Phase 7 — End-to-end verification + docs.** Real app: start → stop mid-run →
   inspect checkpoint → relaunch → auto-resume → completes → transcript matches a
   clean run. Also a hard-kill (reboot proxy) → relaunch → resumes. Update
-  `issues.txt` and `wiki.md`.  **STATUS: not started**
+  `issues.txt` and `wiki.md`.  **STATUS: done**
 
 ## ▶ RESUME HERE
 
-Phase 1. Build `src/job_store.py` + its tests first; it's the isolated
-foundation everything else depends on.
+All phases shipped and verified (unit suite + real-engine stop/resume e2e +
+full app auto-resume-on-launch integration). Update can be closed once the
+follow-ups below are no longer wanted.
+
+## Deferred follow-ups (optional)
+
+- **File-missing resume UX.** Today a resumable job whose source file moved/was
+  deleted is silently discarded at launch. UX review recommended instead keeping
+  the row with a "Can't resume — source file moved or deleted" state + a "Locate
+  file…" action that continues from the still-valid checkpoint. Not built.
+- **Home cards have no inline Stop/Resume/Discard.** Those controls live in the
+  always-visible sidebar Calls list; home cards only show status text. Fine for
+  now (the sidebar is the queue surface); revisit if users act from Home.
+- **Two history rows per interrupted-then-resumed job** (one `stopped`, one
+  `success`). Honest but slightly noisy; could coalesce if it bothers.

@@ -1,5 +1,15 @@
 # Local Transcriber — known issues & TODOs
 
+- [ ] Resumable transcription (shipped 2026-10-16): a job can be stopped any
+      time and resumes from its checkpoint, auto-continuing on next launch even
+      after a reboot. Verified via the unit suite + a real-engine stop/resume
+      e2e + a full app auto-resume-on-launch integration, but NOT yet clicked
+      through the real pywebview GUI window (rendering verified via a DOM stub).
+      Optional follow-ups in updates/2026-10-16 resumable-transcription - OPEN/:
+      file-missing "Locate file…" resume UX (currently such jobs are discarded
+      at launch), inline Stop/Resume on Home cards (sidebar-only today), and the
+      two-history-rows-per-resumed-job cosmetic.
+
 - [ ] Multi-speaker transcripts: real UI click-through with actual multi-track
       audio not yet verified end-to-end. Covered by automated tests (32 passing
       via `pytest` from the project root), but not exercised through the app UI.
