@@ -72,28 +72,28 @@ during polish resumes straight to re-polish + write.
   (atomic); append-only segment log with the filter-on-read rule; `list_resumable()`
   scan; `discard(key)`. Replace `mkdtemp` with the durable dir and stop the
   unconditional `rmtree`. _Tests: config round-trip, segment log append/filter,
-  resumable scan._  **STATUS: not started**
+  resumable scan._  **STATUS: done**
 
 - **Phase 2 — Checkpoint writes in the worker.** Write a checkpoint at every
   phase boundary and persist each completed track/chunk's segments. On success:
   write md, mark done, discard work dir. On stop: mark `"paused"`, keep work
   dir. _Tests: a stopped multi-track job leaves a valid checkpoint with the
-  completed tracks' segments._  **STATUS: not started**
+  completed tracks' segments._  **STATUS: done**
 
 - **Phase 3 — Resume execution (coarse).** `_process` detects a resumable job,
   loads persisted segments, skips completed units/phases, continues. _Tests:
   resuming a checkpoint yields the same final transcript as an uninterrupted
-  run (determinism fixture)._  **STATUS: not started**
+  run (determinism fixture)._  **STATUS: done**
 
 - **Phase 4 — Mid-file Whisper chunk resume (finest).** `transcription.py`
   gains a `chunk_sink` callback + `start_chunk` skip over the deterministic VAD
   chunk list; `engine.py` streams `("chunk", …)`; the worker persists per chunk
   and passes `start_chunk` on resume. Parakeet unchanged (unit-level). _Tests:
-  persisted head + skipped-tail resume == full run._  **STATUS: not started**
+  persisted head + skipped-tail resume == full run._  **STATUS: done**
 
 - **Phase 5 — Auto-resume on launch.** Bridge startup scans resumable jobs,
   reconstructs the `Job`s, re-enqueues them, and emits a "resuming" event.
-  _Tests: reconstruct → enqueue at the bridge level._  **STATUS: not started**
+  _Tests: reconstruct → enqueue at the bridge level._  **STATUS: done**
 
 - **Phase 6 — Stop / Resume UX (web UI).** UX-expert agents design the surface;
   bridge gets `stop_job` / `resume_job` / `discard_job`; the payload carries

@@ -35,4 +35,25 @@
 
 ## Lessons / gotchas
 
-(fill in as we build)
+- **Don't assert byte-identical transcripts across a resume.** The engine path
+  (mlx-whisper in the spawned process) is NOT deterministic across process
+  invocations — two uninterrupted full runs of the same 60s clip through the
+  worker gave 1797 vs 633 chars (whisper-base + spawn + the temperature ladder
+  firing differently). Verified resume correctness the right way instead: the
+  segment log shows each VAD chunk transcribed exactly once, in order, with no
+  gaps or duplicates (scratch `diag.py`), plus deterministic unit tests with a
+  fake engine (`test_worker_resume.py`). Because `condition_on_previous_text=
+  False`, a resumed chunk is independent of whether the previous chunk ran in
+  the same process, so resume adds no seam error beyond the VAD chunk split a
+  full run already makes.
+
+- **`compact()` on resume is essential.** Without it, a stale uncommitted
+  chunk line left by a crash would be re-appended and then, once the unit lands
+  in `completed_units` (where every line is kept), survive as a duplicate. End-
+  to-end stop→resume confirmed a single chunk-0 line, no dup. (scratch
+  `e2e_resume.py`, `diag.py`.)
+
+- **Engine message protocol change is backward-incompatible within the app**:
+  the transcribe request tuple grew a `start_chunk` field and the engine now
+  streams `("chunk", …)` before `("result", …)`. Worker and engine must be
+  updated together.
