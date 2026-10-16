@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import itertools
 import threading
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -25,6 +26,11 @@ class Job:
     # CLI. On by default; the raw transcript is always kept alongside it.
     polish: bool = True
     id: int = field(default_factory=lambda: next(_id_counter))
+    # Persistent, restart-stable identity used to key this job's on-disk work
+    # dir and checkpoint (see src.job_store). Unlike `id` (an in-process counter
+    # that resets to 1 each launch), `key` survives quitting the app, so a paused
+    # job can be found and resumed after a restart or reboot.
+    key: str = field(default_factory=lambda: uuid.uuid4().hex)
     status: JobStatus = "ready"
     status_detail: str | None = None
     stop_event: threading.Event = field(default_factory=threading.Event)
