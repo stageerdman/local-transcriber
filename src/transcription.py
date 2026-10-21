@@ -404,6 +404,44 @@ def _transcribe_with_parakeet(
     return segments
 
 
+# 64 kbps mono keeps a 25-minute call around ~12 MB - well under Groq's
+# per-request size cap (a 413 "request_too_large" on an uncompressed
+# multi-track WAV, confirmed in testing, is what this exists to prevent).
+# Local backends read `audio_path` directly - mp3 for single-track, or an
+# uncompressed 16kHz WAV for an isolated multi-track unit - since on-device
+# decoding never cared about file size; only the upload to Groq does.
+_GROQ_UPLOAD_BITRATE = "64k"
+
+
+def _compact_mp3_for_upload(audio_path: Path) -> Path:
+    """Re-encode to a small mono mp3 in a temp file before uploading to Groq.
+
+    Always re-encodes, even if `audio_path` is already a small mp3 - simpler
+    and more robust than special-casing "is this already small enough", and
+    the extra ffmpeg pass is seconds against an upload+inference call that's
+    already tens of seconds.
+    """
+    ensure_ffmpeg_available()
+    import subprocess
+    import tempfile
+
+    fd, tmp_name = tempfile.mkstemp(suffix=".mp3")
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", str(audio_path), "-vn", "-ac", "1", "-b:a", _GROQ_UPLOAD_BITRATE, str(tmp_path)],
+        check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    return tmp_path
+
+
+def ensure_ffmpeg_available() -> None:
+    from src.converter import check_ffmpeg_installed
+
+    if not check_ffmpeg_installed():
+        raise RuntimeError("ffmpeg is not installed (needed for Cloud transcription). brew install ffmpeg")
+
+
 def _transcribe_with_groq(
     model_name: str,
     audio_path: Path,
@@ -444,15 +482,21 @@ def _transcribe_with_groq(
     if language:
         kwargs["language"] = language
 
+    upload_path = _compact_mp3_for_upload(audio_path)
     try:
-        with open(audio_path, "rb") as f:
-            result = client.audio.transcriptions.create(file=(audio_path.name, f.read()), **kwargs)
+        with open(upload_path, "rb") as f:
+            result = client.audio.transcriptions.create(file=(upload_path.name, f.read()), **kwargs)
     except Exception as exc:  # noqa: BLE001 - re-raised with user-facing copy
         message = str(exc).lower()
         # The underlying message is always appended (not swallowed) - without
         # it, a real failure (rate limit, payload-too-large, auth) is
         # indistinguishable from a transient one and unfixable from the UI's
         # error text alone.
+        if "413" in message or "too large" in message or "request_too_large" in message:
+            raise RuntimeError(
+                "This call is too long for Cloud - even compressed, it's over "
+                f"Groq's upload limit. Use Faster or Best for this one. ({exc})"
+            ) from exc
         if "connection" in message or "timed out" in message or "network" in message:
             raise RuntimeError(
                 "No internet connection - Cloud needs one. Switch to Faster or "
@@ -462,6 +506,8 @@ def _transcribe_with_groq(
             "Cloud transcription failed on Groq's end. Try again in a moment, "
             f"or switch to Faster or Best. ({exc})"
         ) from exc
+    finally:
+        upload_path.unlink(missing_ok=True)
 
     segments = []
     for seg in (getattr(result, "segments", None) or []):
