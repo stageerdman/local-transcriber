@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -51,6 +52,26 @@ def _resolve_model(model_name: str) -> str:
 
 def _is_parakeet_model(model_name: str) -> bool:
     return "parakeet" in model_name.lower()
+
+
+# Cloud backend: Groq hosts stock Whisper weights on their own LPU hardware,
+# not a different model - just a much faster place to run the same weights
+# (confirmed ~7-8x faster than local MLX in the transcription-quality-research
+# update's benchmarking). Prefixing the catalog id keeps it visually distinct
+# from on-device repo ids and makes dispatch a cheap string check.
+GROQ_MODEL_PREFIX = "groq:"
+
+
+def _is_groq_model(model_name: str) -> bool:
+    return model_name.startswith(GROQ_MODEL_PREFIX)
+
+
+# The Cloud quality tier's one model choice. large-v3-turbo over plain
+# large-v3: in blind-ish comparison on real Czech call audio (the
+# transcription-quality-research update), turbo didn't show large-v3's
+# hallucinated-repeat-loop failure on a quiet opening, and it's both faster
+# and cheaper on Groq's pricing.
+GROQ_ID = f"{GROQ_MODEL_PREFIX}whisper-large-v3-turbo"
 
 
 # Tuned Whisper decode options (validated in the transcription-quality-research
@@ -139,6 +160,9 @@ def ensure_model_loaded(model_name: str) -> None:
             pass
         return
 
+    if _is_groq_model(model_name):
+        return  # nothing to preload - each call is a fresh API request
+
     try:
         import mlx.core as mx
         from mlx_whisper.transcribe import ModelHolder
@@ -167,8 +191,8 @@ def transcribe_mp3_segments(
     into speaker-labeled blocks for multi-track jobs.
 
     `progress_callback`, if given, is invoked with a fraction in [0, 1] of the
-    audio processed so far. Both backends report it: Parakeet per chunk,
-    Whisper per VAD speech-region.
+    audio processed so far: Parakeet per chunk, Whisper per VAD speech-region,
+    Groq once (at completion - it's a single blocking API call).
 
     `use_vad` (Whisper path only): run Silero VAD first and transcribe only the
     speech regions. This is the fix for Whisper's silence-hallucination - on
@@ -191,6 +215,9 @@ def transcribe_mp3_segments(
     """
     if _is_parakeet_model(model_name):
         return _transcribe_with_parakeet(model_name, audio_path, progress_callback, chunk_sink)
+
+    if _is_groq_model(model_name):
+        return _transcribe_with_groq(model_name, audio_path, language, progress_callback, chunk_sink)
 
     repo = _resolve_model(model_name)
     if use_vad:
@@ -372,6 +399,75 @@ def _transcribe_with_parakeet(
     ]
     # Parakeet's chunking is internal and opaque, so the whole file resumes as a
     # single unit: emit it all as chunk 0 once the one call returns.
+    if chunk_sink is not None:
+        chunk_sink(0, segments)
+    return segments
+
+
+def _transcribe_with_groq(
+    model_name: str,
+    audio_path: Path,
+    language: str | None,
+    progress_callback: ProgressCallback | None = None,
+    chunk_sink: ChunkSink | None = None,
+) -> list[TranscribedSegment]:
+    """Transcribe via Groq's hosted Whisper API (one HTTP call, whole file).
+
+    Needs `GROQ_API_KEY` in the environment (loaded from `.env` at app
+    startup, inherited by this engine subprocess) and the `groq` package.
+    `verbose_json` is required, not the default `json`/`text`, since it's the
+    only response format that returns per-segment start/end timestamps - the
+    `dialogue`/multi-track pipeline is built entirely on those.
+
+    No mid-call progress or chunking is possible (it's a single blocking
+    upload+inference request), so this matches Parakeet's shape: the whole
+    result lands as chunk 0, and `progress_callback` (if given) only ever
+    fires once, at completion.
+    """
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "Cloud transcription isn't set up - missing API key. Switch to "
+            "Faster or Best to transcribe this one on-device. (To enable Cloud, "
+            "add GROQ_API_KEY to .env - a free key is at console.groq.com/keys.)"
+        )
+    try:
+        from groq import Groq
+    except ImportError as exc:
+        raise RuntimeError(
+            "groq is not installed. Run: pip install -r requirements.txt"
+        ) from exc
+
+    groq_model = model_name[len(GROQ_MODEL_PREFIX):]
+    client = Groq(api_key=api_key)
+    kwargs: dict[str, Any] = {"model": groq_model, "response_format": "verbose_json"}
+    if language:
+        kwargs["language"] = language
+
+    try:
+        with open(audio_path, "rb") as f:
+            result = client.audio.transcriptions.create(file=(audio_path.name, f.read()), **kwargs)
+    except Exception as exc:  # noqa: BLE001 - re-raised with user-facing copy
+        message = str(exc).lower()
+        if "connection" in message or "timed out" in message or "network" in message:
+            raise RuntimeError(
+                "No internet connection - Cloud needs one. Switch to Faster or "
+                "Best to keep working offline."
+            ) from exc
+        raise RuntimeError(
+            "Cloud transcription failed on Groq's end. Try again in a moment, "
+            "or switch to Faster or Best."
+        ) from exc
+
+    segments = []
+    for seg in (getattr(result, "segments", None) or []):
+        get = seg.get if isinstance(seg, dict) else lambda k, d=None: getattr(seg, k, d)
+        text = (get("text") or "").strip()
+        if text:
+            segments.append(TranscribedSegment(start=float(get("start")), end=float(get("end")), text=text))
+
+    if progress_callback is not None:
+        progress_callback(1.0)
     if chunk_sink is not None:
         chunk_sink(0, segments)
     return segments

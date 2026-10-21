@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.transcription import CZECH_FT_ID
+from src.transcription import CZECH_FT_ID, GROQ_ID
 
 # (display label, model id)
 # Czech-finetuned large-v3 (run with Silero VAD) is the default: it won a blind
@@ -9,6 +9,7 @@ from src.transcription import CZECH_FT_ID
 # alternative - robust (never hallucinates) but garbles some Czech words.
 MODEL_CHOICES: list[tuple[str, str]] = [
     ("Czech - finetuned large-v3, best quality (default)", CZECH_FT_ID),
+    ("Cloud - Groq Whisper large-v3-turbo, fastest (needs internet)", GROQ_ID),
     ("Parakeet TDT v3 - fastest, robust", "mlx-community/parakeet-tdt-0.6b-v3"),
     ("Whisper large-v3 - multilingual", "mlx-community/whisper-large-v3-mlx"),
     ("Whisper large-v3-turbo - fast + accurate", "mlx-community/whisper-large-v3-turbo"),
@@ -59,6 +60,10 @@ DEFAULT_REAL_TIME_FACTOR: dict[str, float] = {
     # Whisper) - real-world reports put it around 60x realtime on Apple
     # Silicon, well past every Whisper size here.
     "mlx-community/parakeet-tdt-0.6b-v3": 0.05,
+    # Hosted on Groq's LPUs, not this Mac's GPU - measured ~0.03-0.04x
+    # (25-35x realtime, including network) in the transcription-quality-
+    # research update's benchmarking.
+    GROQ_ID: 0.03,
 }
 FALLBACK_REAL_TIME_FACTOR = 0.35
 
