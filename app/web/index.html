@@ -583,6 +583,7 @@
               <div class="qseg">
                 <button class="qpick" onclick="pickQuality(this,'Fast')">Faster</button>
                 <button class="qpick sel" onclick="pickQuality(this,'Best')">Best</button>
+                <button class="qpick" onclick="pickQuality(this,'Cloud')">Cloud</button>
               </div>
               <span class="qeta" id="qeta">~18 min</span>
               <label class="qtoggle">Tidy<span class="sw on" onclick="this.classList.toggle('on')" role="switch" tabindex="0"></span></label>
@@ -849,8 +850,12 @@
     // Fix-speakers edits currentDetect in place; resync the "… on this call"
     // screen so renamed / re-selected speakers show through when the sheet closes.
     if(currentDetect&&currentDetect.people&&document.getElementById('detect-people'))renderDetect(currentDetect);};
+  // Cloud's line doubles as the "this one leaves the device" disclosure -
+  // always visible the instant it's picked, not hidden behind a tooltip.
+  window.qetaText=function(q){return q==='Cloud'?'~20 sec · sends audio online':(q==='Best'?'~18 min':'~3 min')};
+  const QLABEL_TO_QUALITY={'Faster':'Fast','Best':'Best','Cloud':'Cloud'};
   window.pickQuality=function(el,q){document.querySelectorAll('#seg-detect .qpick').forEach(c=>c.classList.remove('sel'));el.classList.add('sel');
-    const eta=document.getElementById('qeta');if(eta)eta.textContent=q==='Best'?'~18 min':'~3 min'};
+    const eta=document.getElementById('qeta');if(eta)eta.textContent=qetaText(q)};
   function closeRvMenus(){document.querySelectorAll('.rv-menu.open').forEach(m=>m.classList.remove('open'));
     document.querySelectorAll('.rv-cycle[aria-expanded="true"]').forEach(b=>b.setAttribute('aria-expanded','false'));}
   document.addEventListener('keydown',e=>{ if(e.key!=='Escape')return;
@@ -1050,7 +1055,7 @@
       const names={},speakers=[],subtractions={};
       currentDetect.people.forEach(p=>{ if(p.exclude)return; speakers.push(p.index); names[p.index]=p.name; if(p.removes&&p.removes.length)subtractions[p.index]=p.removes; });
       const q=document.querySelector('#seg-detect .qpick.sel');
-      const quality=(q&&q.textContent.trim()==='Faster')?'Fast':'Best';
+      const quality=QLABEL_TO_QUALITY[q&&q.textContent.trim()]||'Best';
       const tidy=!!document.querySelector('.qstep .sw.on');
       A.set_settings({quality,tidy});
       A.transcribe(currentDetect.id,{names,speakers,subtractions,quality,tidy});
@@ -1144,8 +1149,8 @@
       renderCalls();renderCards(); },1000); }
 
   function applySettings(s){
-    document.querySelectorAll('#seg-detect .qpick').forEach(b=>{const isFast=b.textContent.trim()==='Faster';b.classList.toggle('sel',(s.quality==='Fast')===isFast);});
-    const eta=document.getElementById('qeta');if(eta)eta.textContent=s.quality==='Fast'?'~3 min':'~18 min';
+    document.querySelectorAll('#seg-detect .qpick').forEach(b=>{b.classList.toggle('sel',QLABEL_TO_QUALITY[b.textContent.trim()]===s.quality);});
+    const eta=document.getElementById('qeta');if(eta)eta.textContent=qetaText(s.quality);
     const sw=document.querySelector('.qstep .sw');if(sw)sw.classList.toggle('on',!!s.tidy);
   }
   function setGreeting(name){

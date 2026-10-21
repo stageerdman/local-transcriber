@@ -35,8 +35,13 @@ from src import track_separation
 SETTINGS_PATH = Path.home() / "Library" / "Application Support" / "LocalTranscriber" / "settings.json"
 
 FAST_MODEL = "mlx-community/parakeet-tdt-0.6b-v3"
-QUALITY_TO_MODEL = {"Best": catalog.DEFAULT_MODEL, "Fast": FAST_MODEL}
-MODEL_TO_QUALITY = {catalog.DEFAULT_MODEL: "Best", FAST_MODEL: "Fast"}
+QUALITY_TO_MODEL = {"Best": catalog.DEFAULT_MODEL, "Fast": FAST_MODEL, "Cloud": catalog.GROQ_ID}
+MODEL_TO_QUALITY = {catalog.DEFAULT_MODEL: "Best", FAST_MODEL: "Fast", catalog.GROQ_ID: "Cloud"}
+# "Cloud" is opt-in only - never the restored/default tier. This app is
+# offline-first; a user who never touched the quality picker (fresh install,
+# or settings reset) should never be silently switched to the one tier that
+# sends audio off the device.
+_RESTORABLE_QUALITIES = {"Best", "Fast"}
 
 _MEDIA_TYPES = ("Audio / video (*.mp3;*.wav;*.m4a;*.aac;*.flac;*.mp4;*.mov;*.m4v;*.mkv;*.webm)",)
 _MEDIA_EXT = (".mp3", ".wav", ".m4a", ".aac", ".flac", ".mp4", ".mov", ".m4v", ".mkv", ".webm")
@@ -150,8 +155,11 @@ class Bridge:
     # -- settings -------------------------------------------------------------
     def get_settings(self) -> dict:
         model = self._settings.get("model", catalog.DEFAULT_MODEL)
+        quality = MODEL_TO_QUALITY.get(model, "Best")
+        if quality not in _RESTORABLE_QUALITIES:
+            quality = "Best"  # never auto-restore into Cloud - opt-in every launch
         return {
-            "quality": MODEL_TO_QUALITY.get(model, "Best"),
+            "quality": quality,
             "tidy": bool(self._settings.get("polish", catalog.DEFAULT_POLISH_ENABLED)),
             "language": self._settings.get("language", catalog.DEFAULT_LANGUAGE),
         }
