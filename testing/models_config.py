@@ -20,7 +20,7 @@ from typing import Callable
 
 # local-transcriber's src/ package holds the actual mlx-whisper / parakeet
 # integration - reuse it instead of duplicating model-loading logic.
-LOCAL_TRANSCRIBER_ROOT = Path(__file__).resolve().parent.parent / "local-transcriber"
+LOCAL_TRANSCRIBER_ROOT = Path(__file__).resolve().parent.parent
 if str(LOCAL_TRANSCRIBER_ROOT) not in sys.path:
     sys.path.insert(0, str(LOCAL_TRANSCRIBER_ROOT))
 
@@ -147,6 +147,7 @@ BACKENDS: list[TranscriptionBackend] = [
     _make_local_mlx_backend("mlx-community/whisper-medium-mlx", "Whisper Medium (MLX)"),
     _make_local_mlx_backend("mlx-community/whisper-large-v3-mlx", "Whisper Large-v3 (MLX)"),
     _make_local_mlx_backend("mlx-community/whisper-large-v3-turbo", "Whisper Large-v3-turbo (MLX)"),
+    _make_local_mlx_backend("czech-large-v3-mlx", "Whisper Large-v3 Czech-finetune (MLX)"),
     _make_local_mlx_backend("mlx-community/parakeet-tdt-0.6b-v3", "Parakeet TDT v3 (MLX, GPU)"),
     _make_silicon_asr_backend("parakeet-coreml", "Parakeet TDT v3 (CoreML, ANE)"),
     _make_silicon_asr_backend("parakeet-v2-coreml", "Parakeet TDT v2 (CoreML, ANE)"),
