@@ -449,14 +449,18 @@ def _transcribe_with_groq(
             result = client.audio.transcriptions.create(file=(audio_path.name, f.read()), **kwargs)
     except Exception as exc:  # noqa: BLE001 - re-raised with user-facing copy
         message = str(exc).lower()
+        # The underlying message is always appended (not swallowed) - without
+        # it, a real failure (rate limit, payload-too-large, auth) is
+        # indistinguishable from a transient one and unfixable from the UI's
+        # error text alone.
         if "connection" in message or "timed out" in message or "network" in message:
             raise RuntimeError(
                 "No internet connection - Cloud needs one. Switch to Faster or "
-                "Best to keep working offline."
+                f"Best to keep working offline. ({exc})"
             ) from exc
         raise RuntimeError(
             "Cloud transcription failed on Groq's end. Try again in a moment, "
-            "or switch to Faster or Best."
+            f"or switch to Faster or Best. ({exc})"
         ) from exc
 
     segments = []
