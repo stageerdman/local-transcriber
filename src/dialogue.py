@@ -1,10 +1,51 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+import unicodedata
+from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 
 DEFAULT_PAUSE_SECONDS = 0.8
+
+
+@dataclass
+class Word:
+    """One word (or punctuation-attached token) with its own real timestamp.
+
+    `text` is stripped of surrounding whitespace. `lead_space` says whether a
+    separator renders before this word when prose is reconstructed from a word
+    list (see `_join_words`) - each backend knows its own "does punctuation
+    attach to the previous word" convention (Whisper/Parakeet encode it as a
+    leading space on the token itself; ElevenLabs as a separate spacing token),
+    so that knowledge stays local to extraction and never leaks into dialogue
+    merging or the UI.
+    """
+
+    start: float
+    end: float
+    text: str
+    lead_space: bool = True
+
+
+def _join_words(words: list[Word]) -> str:
+    """Reconstruct prose from a word list - the one place block/segment text is
+    built, so the text and its time-indexed words can never drift apart."""
+    parts: list[str] = []
+    for i, w in enumerate(words):
+        if i and w.lead_space:
+            parts.append(" ")
+        parts.append(w.text)
+    return "".join(parts).strip()
+
+
+def _words_for_segment(seg: "Segment") -> list[Word]:
+    """A segment's own words, falling back to one synthetic whole-segment word
+    when the backend didn't supply any - keeps old/resumed data safe without
+    the merge logic needing to know the difference."""
+    if seg.words:
+        return seg.words
+    text = seg.text.strip()
+    return [Word(seg.start, seg.end, text, lead_space=True)] if text else []
 
 
 @dataclass
@@ -20,6 +61,10 @@ class Segment:
     doubled utterance is the real speaker (loud on their own mic) and which is
     mic bleed (a quiet leak into another track). `None` when unknown (e.g. a
     single-track job, where there is no bleed to resolve).
+
+    `words` is this segment's own word-level timing, when the backend can give
+    it (see `src.transcription`); empty when it can't - `_words_for_segment`
+    is the one place that fallback is resolved.
     """
 
     speaker: str
@@ -27,6 +72,7 @@ class Segment:
     end: float
     text: str
     energy: float | None = None
+    words: list[Word] = field(default_factory=list)
 
 
 @dataclass
@@ -42,6 +88,11 @@ class Block:
     # the merged segments' `Segment.energy`). The cross-speaker echo filter uses
     # it to tell the real turn from a quiet bleed copy. `None` when unknown.
     energy: float | None = None
+    # Word-level timing across the whole block, in order - lets the UI seek to
+    # any point in the text, not just the block's start. `text` above is always
+    # `_join_words(words)`: this is the single source of truth for the block's
+    # prose, never maintained independently.
+    words: list[Word] = field(default_factory=list)
 
 
 # --- cross-speaker echo (mic-bleed) removal -----------------------------------
@@ -154,28 +205,53 @@ def merge_segments_into_blocks(
 ) -> list[Block]:
     """Merge segments (any speaker, any order) into chronological dialogue blocks.
 
-    Consecutive segments from the same speaker separated by a gap no longer
-    than `pause_seconds` are merged into one block (this is the "pause-based
-    blocks of text" behavior). A speaker change always starts a new block. A
-    block that starts before the previous block finished is flagged as an
+    A speaker change always starts a new block. Within one speaker's turn, how
+    segments merge depends on whether anyone else is even in the conversation:
+
+    - **2+ speakers present** (a real dialogue): same-speaker segments always
+      merge into the current block, regardless of the gap between them - one
+      block per uninterrupted turn, however long. There's an actual "someone
+      else could have interrupted but didn't" signal here, which is what a
+      turn means.
+    - **Only ever one speaker** (nothing to interrupt the turn - no diarized
+      voice, or everyone else was filtered out): falls back to the original
+      pause-based paragraph splitting, merging only when the gap is within
+      `pause_seconds`. This path renders as plain prose with no per-paragraph
+      timestamps anyway (`render_blocks_markdown`), so it's unaffected by (and
+      not part of) the turn-based merge rule above.
+
+    A block that starts before the previous block finished is flagged as an
     interruption - the previous speaker was talked over.
     """
     ordered = sorted((s for s in segments if s.text.strip()), key=lambda s: s.start)
+    multi_speaker = len({s.speaker for s in ordered}) > 1
 
     blocks: list[Block] = []
     for seg in ordered:
-        text = seg.text.strip()
+        seg_words = _words_for_segment(seg)
         if blocks:
             last = blocks[-1]
             gap = seg.start - last.end
-            if seg.speaker == last.speaker and gap <= pause_seconds:
-                last.text = f"{last.text} {text}".strip()
+            same_speaker = seg.speaker == last.speaker
+            if same_speaker and (multi_speaker or gap <= pause_seconds):
+                if seg_words:
+                    # Force a separating space at the segment join, matching
+                    # the old plain-text-concat behavior, without mutating the
+                    # segment's own word (another block may still reference it
+                    # via `_words_for_segment`'s fallback).
+                    first = seg_words[0]
+                    seg_words = [Word(first.start, first.end, first.text, True), *seg_words[1:]]
+                last.words.extend(seg_words)
+                last.text = _join_words(last.words)
                 last.end = max(last.end, seg.end)
                 last.energy = _max_energy(last.energy, seg.energy)
                 continue
 
         blocks.append(
-            Block(speaker=seg.speaker, start=seg.start, end=seg.end, text=text, energy=seg.energy)
+            Block(
+                speaker=seg.speaker, start=seg.start, end=seg.end,
+                text=_join_words(seg_words), words=list(seg_words), energy=seg.energy,
+            )
         )
 
     flag_interruptions(blocks)
@@ -227,3 +303,107 @@ def render_blocks_markdown(blocks: list[Block]) -> str:
         tag = " (interrupting)" if block.interrupting else ""
         parts.append(f"**{block.speaker}** [{format_timestamp(block.start)}]{tag}\n{block.text}")
     return "\n\n".join(parts) + "\n"
+
+
+# --- polish realignment -------------------------------------------------------
+# Polish (`src.polish`) replaces a block's whole `text` with an LLM-cleaned
+# version - fixed punctuation, dropped filler words, a corrected misheard word.
+# That text no longer lines up positionally with the word-level timing the
+# block was built with. `realign_words_to_text` re-times the new text against
+# the old words so word-level seeking keeps working on what the user actually
+# reads, instead of only on raw (usually never-shown) ASR output.
+
+
+def _fold(text: str) -> str:
+    """Casefold and strip diacritics for matching, so polish adding/removing a
+    Czech diacritic doesn't read as the word having changed."""
+    decomposed = unicodedata.normalize("NFKD", text.lower())
+    return "".join(c for c in decomposed if not unicodedata.combining(c))
+
+
+def realign_words_to_text(words: list[Word], new_text: str) -> list[Word]:
+    """Re-time `new_text` against `words`' original timing.
+
+    Matches `new_text`'s whitespace-delimited tokens to `words` by
+    accent-folded text similarity (`difflib.SequenceMatcher`):
+    - a kept or lightly-corrected token inherits its matched old word's
+      timing,
+    - a dropped filler word has no corresponding output token at all - no
+      orphaned timestamp left behind,
+    - a token with no match (polish essentially never adds content - see the
+      containment guard in `src.polish` - but handle it rather than assume)
+      gets a timestamp interpolated between its timed neighbors.
+
+    Returns a fresh `Word` list; `_join_words(...)` of the result is
+    `new_text`. Call this right after any `block.text = <polished text>`
+    reassignment, before anything downstream reads `block.words`.
+    """
+    new_tokens = new_text.split()
+    if not new_tokens:
+        return []
+    if not words:
+        # Nothing to realign against - keep this pure function total rather
+        # than raise; spread evenly-untimed words rather than invent a time.
+        return [Word(0.0, 0.0, t, lead_space=i > 0) for i, t in enumerate(new_tokens)]
+
+    old_folded = [_fold(w.text) for w in words]
+    new_folded = [_fold(t) for t in new_tokens]
+    matcher = SequenceMatcher(None, old_folded, new_folded, autojunk=False)
+
+    out: list[Word | None] = [None] * len(new_tokens)
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            for offset, j in enumerate(range(j1, j2)):
+                src = words[i1 + offset]
+                out[j] = Word(src.start, src.end, new_tokens[j], lead_space=j > 0)
+        elif tag == "replace":
+            old_span = words[i1:i2]
+            span_len = j2 - j1
+            for offset, j in enumerate(range(j1, j2)):
+                # Distribute an unevenly-sized replace block proportionally
+                # across the old span rather than assuming a 1:1 count match.
+                src = old_span[min(len(old_span) - 1, (offset * len(old_span)) // span_len)]
+                out[j] = Word(src.start, src.end, new_tokens[j], lead_space=j > 0)
+        # "delete": old words with no new token contribute nothing.
+        # pure "insert" (no old span at all) is resolved by interpolation below.
+
+    for j, w in enumerate(out):
+        if w is not None:
+            continue
+        prev_w = next((out[k] for k in range(j - 1, -1, -1) if out[k] is not None), None)
+        next_w = next((out[k] for k in range(j + 1, len(out)) if out[k] is not None), None)
+        if prev_w is not None and next_w is not None:
+            start = end = (prev_w.end + next_w.start) / 2
+        elif prev_w is not None:
+            start = end = prev_w.end
+        elif next_w is not None:
+            start = end = next_w.start
+        else:
+            start = end = 0.0
+        out[j] = Word(start, end, new_tokens[j], lead_space=j > 0)
+
+    return out  # type: ignore[return-value]  # every slot filled above
+
+
+# --- serialization for the UI / history --------------------------------------
+
+
+def blocks_to_dicts(blocks: list[Block]) -> list[dict]:
+    """Plain-dict (JSON-ready) form of `blocks`, for the live UI payload and
+    for persisting into history - the structured alternative to re-parsing the
+    written markdown, which only ever carried block-level timing. Lane/color
+    assignment is a presentation concern and stays with the caller."""
+    return [
+        {
+            "speaker": b.speaker,
+            "start": b.start,
+            "end": b.end,
+            "interrupting": b.interrupting,
+            "text": b.text,
+            "words": [
+                {"start": w.start, "end": w.end, "text": w.text, "lead_space": w.lead_space}
+                for w in b.words
+            ],
+        }
+        for b in blocks
+    ]
