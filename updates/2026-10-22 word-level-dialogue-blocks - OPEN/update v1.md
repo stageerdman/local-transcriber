@@ -105,12 +105,12 @@ within-block highlight, and the legacy/no-word-spans degraded case.
   distinct-speaker-count. _Tests: always-merge-same-speaker-with-2+-speakers,
   speaker-change-always-splits, single-speaker-pause-fallback-unchanged,
   `_join_words` leading-space/boundary behavior, synthetic-`Word`
-  fallback._ **STATUS: not started**
+  fallback._ **STATUS: done** (commit `4f3a423`)
 
 - **Phase 2 — Polish realignment + serialization (`src/dialogue.py`).**
   `realign_words_to_text`; `blocks_to_dicts`. _Tests: equal/replace/delete/
   insert realignment cases, identity case (polish no-op), serialization
-  shape._ **STATUS: not started**
+  shape._ **STATUS: done** (commit `4f3a423`)
 
 - **Phase 3 — Per-backend word population (`src/transcription.py`).**
   Whisper (keep+use `seg["words"]`), Parakeet (token→word grouping via the
