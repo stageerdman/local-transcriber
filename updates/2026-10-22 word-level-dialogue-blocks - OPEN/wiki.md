@@ -61,11 +61,29 @@
   segments cross the dataclass↔dict boundary; `_detect_shared_voice` and the
   echo-filter path only ever touch in-memory `Segment`/`Block` objects.
 
-## Not yet verified (resolve in Phase 3's research spike)
+## Phase 3 research spike (`spike/groq_word_granularity.py`) — real findings
 
-- Groq's actual `verbose_json` word-object field names when
-  `timestamp_granularities=["word","segment"]` is set — the installed SDK's
-  `Transcription` model only statically declares `text: str`; `segments` and
-  `words` are consumed via duck-typing today (same pattern the existing
-  `segments` handling already uses). Needs one real call against a short
-  local fixture before writing that backend's extraction code.
+- Groq's `verbose_json` + `timestamp_granularities=["word","segment"]`
+  returns `words` as a **flat list across the whole file**: each entry is
+  `{"word": str, "start": float, "end": float}` - no leading-space marker (a
+  word's own text has no spacing convention baked in, unlike Whisper's) and
+  no per-segment nesting. `segments` keeps its existing shape
+  (`id, seek, start, end, text, tokens, ...`) with no `words` field added -
+  confirmed via one real call against `testing/videos/martin_track3_60s.mp3`.
+- **First design (bucket words into segments by matching `start` against
+  segment time boundaries) was built, tested on synthetic data, then thrown
+  out after a real end-to-end run exposed it:** on that same 60s real call,
+  segment-level and word-level timestamps come from two independent
+  alignment passes that drift apart over the file - by the 7th segment the
+  drift was a whole word wide, so every bucket from there on grabbed the
+  *next* segment's first word and dropped its own first word, compounding for
+  the rest of the file. Caught by comparing `dialogue._join_words(seg.words)`
+  against `seg.text` end-to-end - they matched in the unit tests (synthetic,
+  no drift) but diverged on 23/25 real segments.
+- **Second design (bucket by word COUNT, not time): consume
+  `len(segment.text.split())` words off the front of the flat list, in
+  order.** Verified on the same real call: summing `len(seg.text.split())`
+  across all 25 segments equals `len(words)` exactly (116 either way) -
+  punctuation attaches to its word in both views, so counts never diverge
+  even though absolute timestamps do. Re-ran the same end-to-end check after
+  switching: 0/25 mismatches.

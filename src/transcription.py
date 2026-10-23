@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
+
+from src.dialogue import Word
 
 # Called during transcription with a fraction in [0, 1] of the audio processed
 # so far. Not every backend can report it (see `transcribe_mp3_segments`).
@@ -22,6 +24,11 @@ class TranscribedSegment:
     start: float
     end: float
     text: str
+    # This segment's own word-level timing, when the backend can give it (see
+    # the per-backend extraction helpers below). Empty when it can't -
+    # `dialogue._words_for_segment`'s synthetic-whole-segment fallback is the
+    # one place that's resolved, so callers never need to check for this.
+    words: list[Word] = field(default_factory=list)
 
 
 # Logical id for the locally-converted Czech-finetuned Whisper large-v3 (see
@@ -124,6 +131,28 @@ def _seg_times(seg: dict) -> tuple[float, float]:
     if words:
         return float(words[0]["start"]), float(words[-1]["end"])
     return float(seg["start"]), float(seg["end"])
+
+
+def _whisper_segment_words(seg: dict, offset: float = 0.0) -> list[Word]:
+    """A Whisper segment's own word-level timing (`word_timestamps=True`).
+
+    Each word dict's `"word"` text carries Whisper's own leading-space
+    convention (a leading space means it's a new word; punctuation is already
+    merged into the previous word with none, by `mlx_whisper`'s own
+    `merge_punctuations`), so that's the direct source for `lead_space`.
+    `offset` shifts into whole-file time for the VAD path, where `seg`'s own
+    times are chunk-relative."""
+    out: list[Word] = []
+    for w in seg.get("words", []):
+        start, end = w.get("start"), w.get("end")
+        if start is None or end is None:
+            continue
+        raw = w.get("word", "")
+        out.append(Word(
+            start=offset + float(start), end=offset + float(end),
+            text=raw.strip(), lead_space=raw.startswith(" "),
+        ))
+    return out
 
 
 def ensure_mlx_whisper_available() -> None:
@@ -264,7 +293,11 @@ def _transcribe_whisper_plain(
         text = seg.get("text", "").strip()
         if text:
             start, end = _seg_times(seg)
-            segments.append(TranscribedSegment(start=start, end=end, text=text))
+            try:
+                words = _whisper_segment_words(seg)
+            except Exception:  # noqa: BLE001 - one segment's own words are optional
+                words = []
+            segments.append(TranscribedSegment(start=start, end=end, text=text, words=words))
     # The plain path is one un-chunked decode: the whole file is chunk 0.
     if chunk_sink is not None:
         chunk_sink(0, segments)
@@ -357,10 +390,15 @@ def _transcribe_whisper_vad(
             text = seg.get("text", "").strip()
             if text:
                 seg_start, seg_end = _seg_times(seg)
+                try:
+                    words = _whisper_segment_words(seg, offset=offset)
+                except Exception:  # noqa: BLE001 - one segment's own words are optional
+                    words = []
                 chunk_segments.append(TranscribedSegment(
                     start=offset + seg_start,
                     end=offset + seg_end,
                     text=text,
+                    words=words,
                 ))
         # Hand off this chunk's segments for durable persistence BEFORE moving on,
         # so a stop/crash after this point keeps the chunk's work.
@@ -382,6 +420,34 @@ def _transcribe_whisper_vad(
 # to avoid this - timestamps come back stitched to the full file regardless.
 _PARAKEET_CHUNK_DURATION_SECONDS = 120.0
 _PARAKEET_CHUNK_OVERLAP_SECONDS = 15.0
+
+
+def _parakeet_sentence_words(tokens: list[Any]) -> list[Word]:
+    """Group a Parakeet sentence's sub-word tokens into whole words.
+
+    `token.start`/`.end` are already absolute-to-the-whole-file (parakeet_mlx
+    applies the chunk offset before cross-chunk merging), so no extra offset
+    math is needed. A token starts a new word iff its own `.text` has a
+    leading space - the same check `parakeet_mlx.alignment.tokens_to_sentences`
+    uses internally to find word boundaries (confirmed by reading that
+    source); punctuation tokens have no leading space and attach to the
+    previous word, e.g. ' r', 'ô', 'z', 'ne', '.' -> 'rôzne.'."""
+    words: list[Word] = []
+    parts: list[str] = []
+    start = end = 0.0
+    lead_space = True
+    for tok in tokens:
+        if parts and tok.text.startswith(" "):
+            words.append(Word(start, end, "".join(parts).strip(), lead_space))
+            parts = []
+        if not parts:
+            start = tok.start
+            lead_space = tok.text.startswith(" ")
+        parts.append(tok.text)
+        end = tok.end
+    if parts:
+        words.append(Word(start, end, "".join(parts).strip(), lead_space))
+    return words
 
 
 def _transcribe_with_parakeet(
@@ -411,11 +477,18 @@ def _transcribe_with_parakeet(
         overlap_duration=_PARAKEET_CHUNK_OVERLAP_SECONDS,
         chunk_callback=chunk_callback,
     )
-    segments = [
-        TranscribedSegment(start=float(sentence.start), end=float(sentence.end), text=sentence.text.strip())
-        for sentence in result.sentences
-        if sentence.text.strip()
-    ]
+    segments = []
+    for sentence in result.sentences:
+        if not sentence.text.strip():
+            continue
+        try:
+            words = _parakeet_sentence_words(sentence.tokens)
+        except Exception:  # noqa: BLE001 - one segment's own words are optional
+            words = []
+        segments.append(TranscribedSegment(
+            start=float(sentence.start), end=float(sentence.end),
+            text=sentence.text.strip(), words=words,
+        ))
     # Parakeet's chunking is internal and opaque, so the whole file resumes as a
     # single unit: emit it all as chunk 0 once the one call returns.
     if chunk_sink is not None:
@@ -461,6 +534,51 @@ def ensure_ffmpeg_available() -> None:
         raise RuntimeError("ffmpeg is not installed (needed for Cloud transcription). brew install ffmpeg")
 
 
+def _groq_get(obj: Any, key: str, default: Any = None) -> Any:
+    return obj.get(key, default) if isinstance(obj, dict) else getattr(obj, key, default)
+
+
+def _bucket_groq_words_by_segment(segments: list[Any], words: list[Any]) -> list[list[Any]]:
+    """Assign Groq's flat per-file word list to the segments it belongs to.
+
+    Groq returns `words` as one flat list across the whole file, not nested
+    per segment (confirmed via this update's own
+    `spike/groq_word_granularity.py`), so there's no index to zip against
+    directly. Bucketing by matching each word's `start` against segment time
+    boundaries was tried first and rejected: on a real ~60s call, word and
+    segment timestamps come from independent alignment passes that drift
+    apart over the file, and by the 7th segment the drift was a whole word
+    wide, shifting every later bucket. Word COUNT doesn't drift - Groq's own
+    segment `text`, split on whitespace, has exactly as many tokens as the
+    `words` entries that make it up (verified on that same real call: 116
+    either way), since punctuation attaches to its word in both views - so
+    segments are filled by consuming that many words off the front of the
+    flat list, in order."""
+    buckets: list[list[Any]] = []
+    i = 0
+    for seg in segments:
+        n = len((_groq_get(seg, "text") or "").split())
+        buckets.append(words[i:i + n])
+        i += n
+    return buckets
+
+
+def _groq_bucket_words(bucket: list[Any]) -> list[Word]:
+    """Groq's word objects (confirmed shape: `word`/`start`/`end`, no leading-
+    space marker) read as plain whitespace-separated text - same convention
+    the segment `text` itself already joins on - so every word simply gets a
+    separating space before it."""
+    out: list[Word] = []
+    for w in bucket:
+        start, end = _groq_get(w, "start"), _groq_get(w, "end")
+        if start is None or end is None:
+            continue
+        text = (_groq_get(w, "word") or "").strip()
+        if text:
+            out.append(Word(start=float(start), end=float(end), text=text, lead_space=True))
+    return out
+
+
 def _transcribe_with_groq(
     model_name: str,
     audio_path: Path,
@@ -485,7 +603,7 @@ def _transcribe_with_groq(
     if not api_key:
         raise RuntimeError(
             "Cloud transcription isn't set up - missing API key. Switch to "
-            "Faster or Best to transcribe this one on-device. (To enable Cloud, "
+            "Fast or Slow to transcribe this one on-device. (To enable Cloud, "
             "add GROQ_API_KEY to .env - a free key is at console.groq.com/keys.)"
         )
     try:
@@ -497,7 +615,14 @@ def _transcribe_with_groq(
 
     groq_model = model_name[len(GROQ_MODEL_PREFIX):]
     client = Groq(api_key=api_key)
-    kwargs: dict[str, Any] = {"model": groq_model, "response_format": "verbose_json"}
+    # Word granularity costs no extra latency over segment-only (confirmed via
+    # this update's own `spike/groq_word_granularity.py`), so it's always
+    # requested alongside the segment timestamps the rest of this pipeline
+    # already depends on.
+    kwargs: dict[str, Any] = {
+        "model": groq_model, "response_format": "verbose_json",
+        "timestamp_granularities": ["word", "segment"],
+    }
     if language:
         kwargs["language"] = language
 
@@ -514,26 +639,35 @@ def _transcribe_with_groq(
         if "413" in message or "too large" in message or "request_too_large" in message:
             raise RuntimeError(
                 "This call is too long for Cloud - even compressed, it's over "
-                f"Groq's upload limit. Use Faster or Best for this one. ({exc})"
+                f"Groq's upload limit. Use Fast or Slow for this one. ({exc})"
             ) from exc
         if "connection" in message or "timed out" in message or "network" in message:
             raise RuntimeError(
-                "No internet connection - Cloud needs one. Switch to Faster or "
-                f"Best to keep working offline. ({exc})"
+                "No internet connection - Cloud needs one. Switch to Fast or "
+                f"Slow to keep working offline. ({exc})"
             ) from exc
         raise RuntimeError(
             "Cloud transcription failed on Groq's end. Try again in a moment, "
-            f"or switch to Faster or Best. ({exc})"
+            f"or switch to Fast or Slow. ({exc})"
         ) from exc
     finally:
         upload_path.unlink(missing_ok=True)
 
+    raw_segments = getattr(result, "segments", None) or []
+    raw_words = getattr(result, "words", None) or []
+    word_buckets = _bucket_groq_words_by_segment(raw_segments, raw_words)
     segments = []
-    for seg in (getattr(result, "segments", None) or []):
-        get = seg.get if isinstance(seg, dict) else lambda k, d=None: getattr(seg, k, d)
-        text = (get("text") or "").strip()
+    for seg, bucket in zip(raw_segments, word_buckets):
+        text = (_groq_get(seg, "text") or "").strip()
         if text:
-            segments.append(TranscribedSegment(start=float(get("start")), end=float(get("end")), text=text))
+            try:
+                words = _groq_bucket_words(bucket)
+            except Exception:  # noqa: BLE001 - one segment's own words are optional
+                words = []
+            segments.append(TranscribedSegment(
+                start=float(_groq_get(seg, "start")), end=float(_groq_get(seg, "end")),
+                text=text, words=words,
+            ))
 
     if progress_callback is not None:
         progress_callback(1.0)
@@ -552,28 +686,58 @@ def _transcribe_with_groq(
 _ELEVENLABS_SEGMENT_GAP_SECONDS = 0.6
 
 
-def _coalesce_elevenlabs_words(words: list[Any]) -> list[TranscribedSegment]:
-    segments: list[TranscribedSegment] = []
-    texts: list[str] = []
-    seg_start: float | None = None
-    seg_end: float | None = None
-    for w in words:
-        if getattr(w, "type", None) != "word" or w.start is None or w.end is None:
+def _elevenlabs_tokens_to_words(tokens: list[Any]) -> list[Word]:
+    """Real words only - `spacing`/`audio_event` entries aren't spoken words,
+    but a `spacing` entry's own text IS this codebase's one real signal for
+    whether a space actually separates the words on either side of it (e.g.
+    none before attached punctuation), so it's read here, not discarded."""
+    out: list[Word] = []
+    pending_space = False
+    for t in tokens:
+        ttype = getattr(t, "type", None)
+        if ttype == "spacing":
+            if getattr(t, "text", None):
+                pending_space = True
             continue
-        if seg_end is not None and (
-            w.start - seg_end > _ELEVENLABS_SEGMENT_GAP_SECONDS
-            or texts[-1].rstrip().endswith((".", "!", "?"))
+        if ttype != "word" or t.start is None or t.end is None:
+            continue
+        out.append(Word(start=float(t.start), end=float(t.end), text=t.text, lead_space=pending_space))
+        pending_space = False
+    return out
+
+
+def _coalesce_elevenlabs_words(tokens: list[Any]) -> list[TranscribedSegment]:
+    """Group ElevenLabs' flat per-word stream into segments the `dialogue`
+    pipeline can consume: a new segment starts on a pause longer than this
+    gap, or right after sentence-ending punctuation. The gap is kept just
+    under `dialogue.DEFAULT_PAUSE_SECONDS` (0.8s) so one speaker's natural
+    mid-sentence breath still gets re-merged into a single block downstream
+    instead of staying split into two."""
+    words = _elevenlabs_tokens_to_words(tokens)
+    segments: list[TranscribedSegment] = []
+    current: list[Word] = []
+    for w in words:
+        if current and (
+            w.start - current[-1].end > _ELEVENLABS_SEGMENT_GAP_SECONDS
+            or current[-1].text.rstrip().endswith((".", "!", "?"))
         ):
-            segments.append(TranscribedSegment(start=seg_start, end=seg_end, text=" ".join(texts).strip()))
-            texts = []
-            seg_start = None
-        if seg_start is None:
-            seg_start = w.start
-        texts.append(w.text)
-        seg_end = w.end
-    if texts:
-        segments.append(TranscribedSegment(start=seg_start, end=seg_end, text=" ".join(texts).strip()))
+            segments.append(_elevenlabs_segment_from_words(current))
+            current = []
+        current.append(w)
+    if current:
+        segments.append(_elevenlabs_segment_from_words(current))
     return segments
+
+
+def _elevenlabs_segment_from_words(words: list[Word]) -> TranscribedSegment:
+    parts: list[str] = []
+    for i, w in enumerate(words):
+        if i and w.lead_space:
+            parts.append(" ")
+        parts.append(w.text)
+    return TranscribedSegment(
+        start=words[0].start, end=words[-1].end, text="".join(parts).strip(), words=list(words),
+    )
 
 
 def _transcribe_with_elevenlabs(
@@ -596,7 +760,7 @@ def _transcribe_with_elevenlabs(
     if not api_key:
         raise RuntimeError(
             "Cloud transcription isn't set up - missing API key. Switch to "
-            "Faster or Best to transcribe this one on-device. (To enable "
+            "Fast or Slow to transcribe this one on-device. (To enable "
             "ElevenLabs Cloud, add ELEVENLABS_API_KEY to .env - get one at "
             "elevenlabs.io.)"
         )
@@ -623,16 +787,16 @@ def _transcribe_with_elevenlabs(
         if "413" in message or "too large" in message or "payload" in message:
             raise RuntimeError(
                 "This call is too long for Cloud - over ElevenLabs' upload "
-                f"limit. Use Faster or Best for this one. ({exc})"
+                f"limit. Use Fast or Slow for this one. ({exc})"
             ) from exc
         if "connection" in message or "timed out" in message or "network" in message:
             raise RuntimeError(
-                "No internet connection - Cloud needs one. Switch to Faster or "
-                f"Best to keep working offline. ({exc})"
+                "No internet connection - Cloud needs one. Switch to Fast or "
+                f"Slow to keep working offline. ({exc})"
             ) from exc
         raise RuntimeError(
             "Cloud transcription failed on ElevenLabs' end. Try again in a "
-            f"moment, or switch to Faster or Best. ({exc})"
+            f"moment, or switch to Fast or Slow. ({exc})"
         ) from exc
 
     words = getattr(result, "words", None) or []

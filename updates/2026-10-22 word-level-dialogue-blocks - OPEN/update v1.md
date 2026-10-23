@@ -116,14 +116,20 @@ within-block highlight, and the legacy/no-word-spans degraded case.
   Whisper (keep+use `seg["words"]`), Parakeet (token→word grouping via the
   leading-space convention — confirmed `AlignedToken.start` is already
   absolute-to-file, no offset math needed), Groq (`timestamp_granularities=
-  ["word","segment"]` + bucket words into segments by time), ElevenLabs
-  (stop discarding `type=="spacing"`, use it for `lead_space`). Per-segment
-  try/except fallback to a synthetic `Word`, not backend-wide. _Research
-  spike first: one real Groq `verbose_json` call with word granularity
-  against a short local fixture to confirm the actual field names before
-  writing that backend's code — record in `wiki.md`._ _Tests: Parakeet
-  token-grouping, Groq word-bucketing, ElevenLabs spacing→`lead_space`, each
-  a pure function._ **STATUS: not started**
+  ["word","segment"]` + bucket words into segments by word COUNT, not time —
+  see wiki.md, a real end-to-end run showed segment/word timestamps drift
+  apart over a file), ElevenLabs (stop discarding `type=="spacing"`, use it
+  for `lead_space`). Per-segment try/except fallback to a synthetic `Word`,
+  not backend-wide. _Tests: Parakeet token-grouping, Groq word-bucketing
+  (including the drift case that sank the first design), ElevenLabs
+  spacing→`lead_space`, Whisper word extraction incl. VAD offset - each a
+  pure function (`tests/test_transcription_words.py`,
+  `tests/test_transcription_elevenlabs.py`)._ **STATUS: done** — also
+  verified end-to-end on a real ~60s call through all four backends
+  (`dialogue._join_words(seg.words) == seg.text` for every segment: Parakeet
+  3/3, Whisper-tiny 6/6, Groq 25/25; ElevenLabs blocked from this sandbox by
+  an IP allowlist on the API key, verified via the installed SDK's pydantic
+  model instead - see wiki.md).
 
 - **Phase 4 — Resumability (`src/job_store.py`, `app/worker.py`).**
   `_persist_chunk` serializes `seg.words`; `_restore_unit` reconstructs them,
