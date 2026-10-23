@@ -300,9 +300,9 @@
     font-weight:650;font-size:14px;box-shadow:var(--shadow);transition:transform .12s,filter .12s;display:flex;align-items:center;gap:8px}
   .go:hover{transform:translateY(-1px);filter:brightness(1.05)}
   /* compact quality step on the detect screen */
-  .qstep{display:flex;align-items:center;gap:14px;margin-top:20px;padding-top:16px;border-top:1px solid var(--line)}
+  .qstep{display:flex;flex-wrap:wrap;align-items:center;gap:14px;row-gap:10px;margin-top:20px;padding-top:16px;border-top:1px solid var(--line)}
   .qstep .qlabel{font-size:12.5px;color:var(--muted);font-weight:600}
-  .qseg{display:inline-flex;border:1px solid var(--line-strong);border-radius:999px;overflow:hidden}
+  .qseg{display:inline-flex;flex-shrink:0;border:1px solid var(--line-strong);border-radius:999px;overflow:hidden}
   .qseg .qpick{padding:6px 16px;font-size:12.5px;font-weight:600;color:var(--muted);transition:background .12s,color .12s}
   .qseg .qpick.sel{background:var(--accent);color:var(--accent-ink)}
   .qtoggle{display:inline-flex;align-items:center;gap:8px;font-size:12.5px;color:var(--muted);margin-left:auto;cursor:pointer}
@@ -581,8 +581,8 @@
             <div class="qstep">
               <span class="qlabel">Quality</span>
               <div class="qseg">
-                <button class="qpick" onclick="pickQuality(this,'Fast')">Faster</button>
-                <button class="qpick sel" onclick="pickQuality(this,'Best')">Best</button>
+                <button class="qpick" onclick="pickQuality(this,'Fast')">Fast</button>
+                <button class="qpick sel" onclick="pickQuality(this,'Slow')">Slow</button>
                 <button class="qpick" onclick="pickQuality(this,'Cloud')">Cloud</button>
               </div>
               <span class="qeta" id="qeta">~18 min</span>
@@ -852,8 +852,13 @@
     if(currentDetect&&currentDetect.people&&document.getElementById('detect-people'))renderDetect(currentDetect);};
   // Cloud's line doubles as the "this one leaves the device" disclosure -
   // always visible the instant it's picked, not hidden behind a tooltip.
-  window.qetaText=function(q){return q==='Cloud'?'~20 sec · sends audio online':(q==='Best'?'~18 min':'~3 min')};
-  const QLABEL_TO_QUALITY={'Faster':'Fast','Best':'Best','Cloud':'Cloud'};
+  // Cloud is ElevenLabs only (see cloud-model-research spike: it beat Groq on
+  // Czech accuracy badly enough to drop Groq from the picker entirely).
+  window.qetaText=function(q){
+    if(q==='Cloud')return'~4 min · sends audio online';
+    return q==='Slow'?'~18 min':'~3 min';
+  };
+  const QLABEL_TO_QUALITY={'Fast':'Fast','Slow':'Slow','Cloud':'Cloud'};
   window.pickQuality=function(el,q){document.querySelectorAll('#seg-detect .qpick').forEach(c=>c.classList.remove('sel'));el.classList.add('sel');
     const eta=document.getElementById('qeta');if(eta)eta.textContent=qetaText(q)};
   function closeRvMenus(){document.querySelectorAll('.rv-menu.open').forEach(m=>m.classList.remove('open'));
@@ -1055,7 +1060,7 @@
       const names={},speakers=[],subtractions={};
       currentDetect.people.forEach(p=>{ if(p.exclude)return; speakers.push(p.index); names[p.index]=p.name; if(p.removes&&p.removes.length)subtractions[p.index]=p.removes; });
       const q=document.querySelector('#seg-detect .qpick.sel');
-      const quality=QLABEL_TO_QUALITY[q&&q.textContent.trim()]||'Best';
+      const quality=QLABEL_TO_QUALITY[q&&q.textContent.trim()]||'Slow';
       const tidy=!!document.querySelector('.qstep .sw.on');
       A.set_settings({quality,tidy});
       A.transcribe(currentDetect.id,{names,speakers,subtractions,quality,tidy});

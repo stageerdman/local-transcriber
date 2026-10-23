@@ -35,13 +35,19 @@ from src import track_separation
 SETTINGS_PATH = Path.home() / "Library" / "Application Support" / "LocalTranscriber" / "settings.json"
 
 FAST_MODEL = "mlx-community/parakeet-tdt-0.6b-v3"
-QUALITY_TO_MODEL = {"Best": catalog.DEFAULT_MODEL, "Fast": FAST_MODEL, "Cloud": catalog.GROQ_ID}
-MODEL_TO_QUALITY = {catalog.DEFAULT_MODEL: "Best", FAST_MODEL: "Fast", catalog.GROQ_ID: "Cloud"}
+QUALITY_TO_MODEL = {"Slow": catalog.DEFAULT_MODEL, "Fast": FAST_MODEL, "Cloud": catalog.ELEVENLABS_ID}
+MODEL_TO_QUALITY = {
+    catalog.DEFAULT_MODEL: "Slow", FAST_MODEL: "Fast", catalog.ELEVENLABS_ID: "Cloud",
+}
 # "Cloud" is opt-in only - never the restored/default tier. This app is
 # offline-first; a user who never touched the quality picker (fresh install,
 # or settings reset) should never be silently switched to the one tier that
 # sends audio off the device.
-_RESTORABLE_QUALITIES = {"Best", "Fast"}
+_RESTORABLE_QUALITIES = {"Slow", "Fast"}
+
+
+def _model_for_quality(quality: str) -> str:
+    return QUALITY_TO_MODEL.get(quality, catalog.DEFAULT_MODEL)
 
 _MEDIA_TYPES = ("Audio / video (*.mp3;*.wav;*.m4a;*.aac;*.flac;*.mp4;*.mov;*.m4v;*.mkv;*.webm)",)
 _MEDIA_EXT = (".mp3", ".wav", ".m4a", ".aac", ".flac", ".mp4", ".mov", ".m4v", ".mkv", ".webm")
@@ -155,9 +161,9 @@ class Bridge:
     # -- settings -------------------------------------------------------------
     def get_settings(self) -> dict:
         model = self._settings.get("model", catalog.DEFAULT_MODEL)
-        quality = MODEL_TO_QUALITY.get(model, "Best")
+        quality = MODEL_TO_QUALITY.get(model, "Slow")
         if quality not in _RESTORABLE_QUALITIES:
-            quality = "Best"  # never auto-restore into Cloud - opt-in every launch
+            quality = "Slow"  # never auto-restore into Cloud - opt-in every launch
         return {
             "quality": quality,
             "tidy": bool(self._settings.get("polish", catalog.DEFAULT_POLISH_ENABLED)),
@@ -166,7 +172,7 @@ class Bridge:
 
     def set_settings(self, patch: dict) -> dict:
         if "quality" in patch:
-            self._settings["model"] = QUALITY_TO_MODEL.get(patch["quality"], catalog.DEFAULT_MODEL)
+            self._settings["model"] = _model_for_quality(patch["quality"])
         if "tidy" in patch:
             self._settings["polish"] = bool(patch["tidy"])
         if "language" in patch:
@@ -349,7 +355,7 @@ class Bridge:
         if names:
             job.track_names = {int(k): v for k, v in names.items()}
         if "quality" in options:
-            job.model = QUALITY_TO_MODEL.get(options["quality"], job.model)
+            job.model = _model_for_quality(options["quality"])
         if "tidy" in options:
             job.polish = bool(options["tidy"])
         speakers = options.get("speakers")  # final set of track indices to transcribe
