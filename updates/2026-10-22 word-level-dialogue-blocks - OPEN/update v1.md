@@ -166,12 +166,17 @@ within-block highlight, and the legacy/no-word-spans degraded case.
   row; fresh DB round-trips `turns_json`; most-recent-match and
   no-match-returns-None cases._ **STATUS: done**
 
-- **Phase 7 — Bridge wiring (`app/bridge.py`).** `_job_payload` builds the
-  transcript payload from `job.turns` (shared helper with the history path)
-  instead of re-parsing the `.md`; `open_call` looks up `turns_json` by
-  output path, falling back to `_parse_transcript` for legacy rows /
-  single-track jobs. _Tests: extend the bridge test suite for both
-  paths._ **STATUS: not started**
+- **Phase 7 — Bridge wiring (`app/bridge.py`).** New `_turns_payload(turns)`
+  builds the same `{"speakers", "turns"}` shape `_parse_transcript` always
+  returned, but from real data - `start`/`end`/`words` now ride along too.
+  `_job_payload` uses it from `job.turns` when set; `open_call` looks up
+  `history_db.turns_json_for_output_path` and uses it when present. Both
+  fall back to `_parse_transcript(md_path)` otherwise (legacy rows,
+  single-track jobs, or a malformed `turns_json` row - degrade, don't fail
+  the open). _Tests: `tests/test_bridge_turns.py` - both paths for
+  `_job_payload` and `open_call`, plus the missing-file error case._
+  **STATUS: done** — also smoke-tested with a real `Bridge()` construction
+  (worker thread + real sqlite history.db), not just the unit tests.
 
 - **Phase 8 — UX pass + `app/web/index.html`.** UX-expert agent(s) design
   clickable word/phrase rendering, progressive within-block read-along

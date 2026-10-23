@@ -26,7 +26,7 @@ import webview
 
 from app.jobs import Job
 from app.worker import SENTINEL, TranscriptionWorker
-from src import catalog, history_db, job_store
+from src import catalog, dialogue, history_db, job_store
 from src.audio_tracks import safe_probe_audio_streams, track_speaker_names
 from src.duration import probe_duration_seconds
 from src.playback import TrackPlayer
@@ -110,6 +110,28 @@ def _parse_transcript(md_path: Path) -> dict:
         turns = [{"speaker": "", "lane": "a", "ts": "", "text": p.strip(), "interrupting": False}
                  for p in body.strip().split("\n\n") if p.strip()]
     return {"speakers": list(lanes.keys()), "turns": turns}
+
+
+def _turns_payload(turns: list[dict]) -> dict:
+    """The same `{"speakers", "turns"}` shape `_parse_transcript` builds from
+    the written `.md`, but from real structured data (`dialogue.
+    blocks_to_dicts`) instead of a markdown re-parse - carries `start`/`end`/
+    `words` through for click-to-seek, which the regex path never had. Shared
+    by `_job_payload` (a just-finished job) and `open_call` (reopening a past
+    one from history), so there's one place this shape is built."""
+    lanes: dict[str, str] = {}
+    out = []
+    for t in turns:
+        name = t.get("speaker") or ""
+        if name not in lanes:
+            lanes[name] = "a" if len(lanes) % 2 == 0 else "b"
+        out.append({
+            "speaker": name, "lane": lanes[name],
+            "ts": dialogue.format_timestamp(t.get("start") or 0.0),
+            "text": t.get("text", ""), "interrupting": bool(t.get("interrupting")),
+            "start": t.get("start"), "end": t.get("end"), "words": t.get("words") or [],
+        })
+    return {"speakers": list(lanes.keys()), "turns": out}
 
 
 class Bridge:
@@ -199,7 +221,14 @@ class Bridge:
         p = Path(output_path)
         if not p.exists():
             return {"error": "That transcript file is missing."}
-        data = _parse_transcript(p)
+        turns_json = history_db.turns_json_for_output_path(self.db, output_path)
+        if turns_json:
+            try:
+                data = _turns_payload(json.loads(turns_json))
+            except (json.JSONDecodeError, TypeError, KeyError):
+                data = _parse_transcript(p)  # malformed row - degrade, don't fail the open
+        else:
+            data = _parse_transcript(p)  # legacy row, or a single-track job (no blocks)
         data["name"] = p.stem
         data["output"] = output_path
         return data
@@ -480,7 +509,9 @@ class Bridge:
         if job.status == "done" and job.output_path:
             payload["output"] = str(job.output_path)
             try:
-                payload["transcript"] = _parse_transcript(Path(job.output_path))
+                payload["transcript"] = (
+                    _turns_payload(job.turns) if job.turns else _parse_transcript(Path(job.output_path))
+                )
             except Exception:  # noqa: BLE001
                 pass
         if job.status == "error":
