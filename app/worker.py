@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import multiprocessing
 import queue
 import sqlite3
@@ -671,4 +672,5 @@ class TranscriptionWorker(threading.Thread):
             finished_at=datetime.now().isoformat(timespec="seconds"),
             status=status,
             error=error,
+            turns_json=json.dumps(job.turns, ensure_ascii=False) if job.turns else None,
         )

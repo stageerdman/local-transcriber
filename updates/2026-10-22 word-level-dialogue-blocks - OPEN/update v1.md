@@ -154,12 +154,17 @@ within-block highlight, and the legacy/no-word-spans degraded case.
   `job.turns[i]["text"]` via `_join_words` — the actual regression this phase
   exists to prevent._ **STATUS: done**
 
-- **Phase 6 — History DB schema (`src/history_db.py`).** `turns_json`
-  column + guarded `ALTER TABLE` migration (first one in this codebase —
-  treat as novel); thread through `record_run`/`fetch_history`/`HistoryRow`;
-  new lookup-by-`output_path` (most-recent-match, column isn't unique).
-  _Tests: pre-migration DB fixture (no column) migrates and reads back NULL
-  on old rows; fresh DB round-trips `turns_json`._ **STATUS: not started**
+- **Phase 6 — History DB schema (`src/history_db.py`).** `_migrate()` adds
+  `turns_json TEXT` via a guarded `ALTER TABLE` (checked against `PRAGMA
+  table_info` first, so it's safe to call on every `init_db()`) — this
+  codebase's first schema migration. Threaded through `record_run`/
+  `fetch_history`/`HistoryRow`; new `turns_json_for_output_path` (most-
+  recent-match, the column isn't unique). `app/worker.py`'s
+  `_record_history` passes `json.dumps(job.turns)` when set. _Tests:
+  pre-migration DB fixture (written with the bare old `SCHEMA`, bypassing
+  `init_db`) migrates on open and reads back `turns_json=None` on the old
+  row; fresh DB round-trips `turns_json`; most-recent-match and
+  no-match-returns-None cases._ **STATUS: done**
 
 - **Phase 7 — Bridge wiring (`app/bridge.py`).** `_job_payload` builds the
   transcript payload from `job.turns` (shared helper with the history path)
