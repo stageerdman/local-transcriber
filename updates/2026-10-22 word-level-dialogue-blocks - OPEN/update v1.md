@@ -178,15 +178,34 @@ within-block highlight, and the legacy/no-word-spans degraded case.
   **STATUS: done** — also smoke-tested with a real `Bridge()` construction
   (worker thread + real sqlite history.db), not just the unit tests.
 
-- **Phase 8 — UX pass + `app/web/index.html`.** UX-expert agent(s) design
-  clickable word/phrase rendering, progressive within-block read-along
-  highlight, and the legacy-degradation look; then implement. _Verify in the
-  real running app (not just tests) per this project's working
-  agreement._ **STATUS: not started**
+- **Phase 8 — UX pass + `app/web/index.html`.** A dedicated UX-expert agent
+  pass designed and implemented all three pieces: `.say .w` word spans
+  (click-to-seek, hover-underline only - no per-word tab stop, the existing
+  `.ts` timestamp stays the one keyboard-reachable seek point), a cumulative
+  `.said`-class sweep for the progressive within-block highlight (chosen
+  over a single-word spotlight - forgiving of the 300ms poll cadence, no
+  jitter), and the degraded case falls out structurally (`sayHtml` returns
+  plain escaped text when `words` is empty - no separate code path for
+  legacy/single-track rows). Mock data augmented so the standalone
+  browser-preview mode exercises the new path too.
+  **STATUS: implemented, NOT visually verified** — this sandbox has no
+  Chrome extension connection (confirmed via `tabs_context_mcp`, same
+  limitation Phase 7 hit) and no native-window access, so neither the fork
+  nor I could screenshot/click-through the real rendering. Verified instead
+  via a Node script re-implementing `sayHtml` + the word-index scan against
+  10 cases (spacing, escaping/XSS, boundaries) and `node --check` on the
+  extracted script - confirms the *logic*, not the *feel* (hover affordance,
+  `.25s` transition smoothness against real audio cadence). **Needs one
+  real look in the running app before this update closes.**
 
-## ▶ RESUME HERE
+## ▶ RESUME HERE (2026-10-23)
 
-Starting Phase 1.
+All 8 phases implemented, 176 tests passing (up from 150 at the start of
+this update). **Only remaining gate before closing:** open a real
+multi-track call in the running app and confirm word-click-to-seek and the
+progressive read-along highlight actually feel right — this sandbox has no
+Chrome extension or native-window access, so Phase 8's visual feel was never
+seen, only logic-verified (see Phase 8 above). Everything else is done.
 
 ## Deferred follow-ups (optional)
 

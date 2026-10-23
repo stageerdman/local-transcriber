@@ -87,3 +87,30 @@
   punctuation attaches to its word in both views, so counts never diverge
   even though absolute timestamps do. Re-ran the same end-to-end check after
   switching: 0/25 mismatches.
+
+## Phase 8 UX decisions
+
+- **Word-click is a mouse-only enhancement, not a keyboard-parity feature.**
+  The existing per-turn `.ts` timestamp stays the one keyboard-reachable seek
+  point; giving every word its own tab stop would make a 50+ word turn
+  unusable with Tab. Conscious trade-off, not an oversight.
+- **Progressive highlight is a cumulative reveal (`.said` class up to the
+  current word index), not a moving single-word spotlight.** At the existing
+  300ms playback-position poll cadence, a spotlight that jumps between
+  exactly one word at a time would read as jittery/laggy on any polling gap.
+  A monotonic "already-read fades to full ink" sweep tolerates gaps for free
+  (state only ever needs `wIdx >= previous`) and matches familiar read-along
+  UIs (podcast transcripts, teleprompters).
+- **Degradation is structural, not a parallel code path.** `sayHtml(t)`
+  returns plain escaped text when `t.words` is empty; the CSS rules only
+  ever target `.say .w` spans, which simply don't exist on a degraded turn.
+  Single-track jobs, legacy history rows, and most of the mock demo data all
+  render exactly as they did before this phase, with zero special-casing in
+  `renderTranscript`.
+- **Not verified visually in this environment.** No Chrome extension
+  connection and no native-window access in this sandbox (confirmed via
+  `tabs_context_mcp`) — logic was checked with a standalone Node
+  reimplementation of `sayHtml` + the word-index scan against 10 cases
+  (spacing, XSS-escaping, boundaries) plus `node --check` on the extracted
+  script, but the actual feel (hover affordance, `.25s` transition
+  smoothness against real audio) needs one real look in the running app.

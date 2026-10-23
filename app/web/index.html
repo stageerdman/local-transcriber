@@ -243,6 +243,18 @@
   .turn.playing{background:var(--spk-a-soft)}
   .turn--b.playing{background:var(--spk-b-soft)}
   .turn.playing .say{color:var(--ink)}
+  /* Word-level seeking (mouse-affordance only - see .ts for the keyboard-
+     reachable per-turn seek point, unchanged by this). A no-op when a turn
+     has no .w spans at all (degraded case), so nothing below needs its own
+     fallback rule. */
+  .say .w{cursor:pointer}
+  .say .w:hover{text-decoration:underline;text-decoration-color:var(--accent);
+    text-decoration-thickness:1.5px;text-underline-offset:3px}
+  /* Progressive read-along: only the actively-playing turn's words dim/
+     reveal - every other turn (including ones with no word data) keeps the
+     plain full-contrast text it always had. */
+  .turn.playing .say .w{color:var(--muted);transition:color .25s}
+  .turn.playing .say .w.said{color:var(--ink)}
 
   /* player */
   /* pinned to the viewport bottom (within the main column), so it stays put while the transcript scrolls */
@@ -656,11 +668,45 @@
     ['a','03:22',"Spíš s věkem, myslím. Dřív to nebyl problém. Byl jsem u sexologa, ale moc to nikam nevedlo."],
   ].map(t=>({lane:t[0],ts:t[1],text:t[2],speaker:({a:'Klient',b:'Obchodník'})[t[0]]}));
 
+  // Word-level timing only exists for real multi-track jobs (see
+  // word-level-dialogue-blocks update, Phase 3 on) - most mock turns have
+  // none, matching the degraded case real legacy/single-track rows hit.
+  // One turn gets synthetic words here so this standalone preview (no
+  // pywebview backend) still exercises the word-click/read-along path, not
+  // just the fallback.
+  (function(){
+    const t=MOCK_TURNS[0];
+    let cur=tsToSecs(t.ts);
+    t.start=cur;
+    t.words=t.text.split(' ').map((w,i)=>{
+      const dur=0.22+0.045*w.length, start=cur, end=cur+dur;
+      cur=end+0.08;
+      return {start, end, text:w, lead_space:i>0};
+    });
+    t.end=cur;
+  })();
+
   function esc(s){return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+  // One clickable word span per word, leading space rendered OUTSIDE the
+  // span (so hovering/underlining a word never drags the gap before it
+  // along with it). Falls back to plain text - unchanged from before this
+  // phase - when a turn has no word-level data (single-track jobs, legacy
+  // history rows, this mock data's other turns).
+  function sayHtml(t){
+    const words=t.words;
+    if(!words||!words.length)return esc(t.text);
+    return words.map((w,i)=>(i&&w.lead_space?' ':'')+
+      `<span class="w" data-start="${w.start}" onclick="seekWord(this)">${esc(w.text)}</span>`).join('');
+  }
   let curTurns=[], curTotalSecs=0;
   function renderTranscript(data){
     const turns=data.turns||[];
-    curTurns=turns.map(t=>({lane:t.lane,secs:tsToSecs(t.ts)}));
+    // `t.start` (real seconds, Phase 7+) is preferred over parsing the
+    // rounded-to-the-second `ts` display string, when present.
+    curTurns=turns.map(t=>({
+      lane:t.lane, secs:(t.start!=null?t.start:tsToSecs(t.ts)),
+      words:(t.words||[]).map(w=>w.start),
+    }));
     curTotalSecs=tsToSecs(data.dur)||(curTurns.length?curTurns[curTurns.length-1].secs+30:0);
     const laneName={};turns.forEach(t=>{if(t.lane&&t.speaker)laneName[t.lane]=t.speaker});
     const nameA=laneName.a||'Speaker 1',nameB=laneName.b||'Speaker 2';
@@ -673,7 +719,7 @@
       <div class="turn turn--${t.lane||'a'}" data-i="${i}">
         <div class="ts" onclick="seek(this)">${esc(t.ts)}</div>
         <div>${t.speaker?`<div class="spk"><span class="bar"></span>${esc(t.speaker)}</div>`:''}
-        <p class="say">${esc(t.text)}</p></div>
+        <p class="say">${sayHtml(t)}</p></div>
       </div>`).join('');
   }
   window.renderTranscript=renderTranscript;
@@ -779,14 +825,23 @@
   window.togglePlay=function(){playing=!playing;
     document.getElementById('picon').innerHTML=playing?'<path d="M7 5h4v14H7zM13 5h4v14h-4z"/>':'<path d="M8 5v14l11-7z"/>';
   };
-  window.seek=function(ts){const turn=ts.closest('.turn');
+  // Shared by seek() (block-level, from a .ts click) and seekWord() (word-
+  // level, from a .w click) - same visual activation either way, just a
+  // different source for the display time label.
+  function _activateTurn(turn,timeLabel){
     document.querySelectorAll('.turn').forEach(t=>t.classList.remove('playing'));
     turn.classList.add('playing');
-    document.getElementById('ptime').textContent=ts.textContent;
+    document.getElementById('ptime').textContent=timeLabel;
     const spk=turn.querySelector('.spk').textContent.trim();
     const p=document.getElementById('pspk');p.textContent=spk;
     p.style.color=turn.classList.contains('turn--a')?'var(--spk-a)':'var(--spk-b)';
     turn.scrollIntoView({behavior:'smooth',block:'center'});
+  }
+  window.seek=function(ts){const turn=ts.closest('.turn');
+    _activateTurn(turn,ts.textContent);
+  };
+  window.seekWord=function(el){const turn=el.closest('.turn'); if(!turn)return;
+    _activateTurn(turn,fmtSecs(+el.dataset.start||0));
   };
   window.startProc=function(){
     document.getElementById('seg-detect').classList.remove('show');
@@ -870,7 +925,7 @@
   // ===== engine bridge (pywebview). Falls back to the mock demo when absent. =====
   function api(){return (window.pywebview&&window.pywebview.api)||null}
   let currentDetect=null, currentSource=null, currentOutput=null, curSecs=0, isPlaying=false;
-  let posTimer=null, lastUserScroll=0, lastHi=-1, previewTimer=null, activePrev=null;
+  let posTimer=null, lastUserScroll=0, lastHi=-1, lastWordHi=-1, previewTimer=null, activePrev=null;
   function tsToSecs(ts){const p=(ts||'').trim().split(':').map(Number);
     if(p.length===3)return (p[0]*3600+p[1]*60+p[2])||0; if(p.length===2)return (p[0]*60+p[1])||0; return 0;}
   function fmtSecs(s){s=Math.max(0,Math.round(s));const h=Math.floor(s/3600),m=Math.floor(s%3600/60),x=s%60;
@@ -880,12 +935,25 @@
   function setFill(frac){const f=document.querySelector('.player .fill');if(f)f.style.right=(100-Math.max(0,Math.min(1,frac))*100)+'%';}
   function highlightAt(secs){
     let idx=-1;for(let i=0;i<curTurns.length;i++){if(curTurns[i].secs<=secs)idx=i;else break;}
-    if(idx<0||idx===lastHi)return; lastHi=idx;
-    const turns=document.querySelectorAll('#script .turn');turns.forEach(t=>t.classList.remove('playing'));
-    const el=turns[idx];if(!el)return;el.classList.add('playing');
-    const spk=el.querySelector('.spk'),p=document.getElementById('pspk');
-    if(spk&&p){p.textContent=spk.textContent.trim();p.style.color=el.classList.contains('turn--a')?'var(--spk-a)':'var(--spk-b)';}
-    if(Date.now()-lastUserScroll>4000)el.scrollIntoView({behavior:'smooth',block:'center'});
+    if(idx<0)return;
+    const turns=document.querySelectorAll('#script .turn');
+    const el=turns[idx];if(!el)return;
+    if(idx!==lastHi){
+      lastHi=idx; lastWordHi=-1;
+      turns.forEach(t=>t.classList.remove('playing'));
+      el.classList.add('playing');
+      const spk=el.querySelector('.spk'),p=document.getElementById('pspk');
+      if(spk&&p){p.textContent=spk.textContent.trim();p.style.color=el.classList.contains('turn--a')?'var(--spk-a)':'var(--spk-b)';}
+      if(Date.now()-lastUserScroll>4000)el.scrollIntoView({behavior:'smooth',block:'center'});
+    }
+    // Progressive within-block sweep: words up to the current position get
+    // `.said` (revealed to full contrast - see the .turn.playing .say .w
+    // rules). A no-op when this turn has no word-level data at all.
+    const words=curTurns[idx].words;
+    if(!words||!words.length)return;
+    let wIdx=-1;for(let i=0;i<words.length;i++){if(words[i]<=secs)wIdx=i;else break;}
+    if(wIdx===lastWordHi)return; lastWordHi=wIdx;
+    el.querySelectorAll('.say .w').forEach((s,i)=>s.classList.toggle('said',i<=wIdx));
   }
   function startLoop(){ stopLoop(); posTimer=setInterval(()=>{
     const A=api();if(!A){stopLoop();return;}
@@ -898,7 +966,10 @@
   },300); }
   function stopLoop(){ if(posTimer){clearInterval(posTimer);posTimer=null;} }
   const _seek=window.seek;
-  window.seek=function(el){ if(_seek)_seek(el); curSecs=tsToSecs(el.textContent); lastHi=-1;
+  window.seek=function(el){ if(_seek)_seek(el); curSecs=tsToSecs(el.textContent); lastHi=-1; lastWordHi=-1;
+    const A=api(); if(A&&currentSource){A.play_source(currentSource,curSecs,0);setPlayIcon(true);startLoop();} };
+  const _seekWord=window.seekWord;
+  window.seekWord=function(el){ if(_seekWord)_seekWord(el); curSecs=+el.dataset.start||0; lastHi=-1; lastWordHi=-1;
     const A=api(); if(A&&currentSource){A.play_source(currentSource,curSecs,0);setPlayIcon(true);startLoop();} };
   window.togglePlay=function(){ const A=api();
     if(A&&currentSource){ if(isPlaying){A.stop_audio();setPlayIcon(false);stopLoop();} else {A.play_source(currentSource,curSecs,0);setPlayIcon(true);lastHi=-1;startLoop();} return; }
@@ -1047,7 +1118,7 @@
     const c=calls[i]; if(!c||c.status!=='done')return;
     calls.forEach(x=>x.active=false); c.active=true; renderCalls();
     currentSource=c.source||null; currentOutput=c.output||null; curSecs=0; setPlayIcon(false);
-    stopLoop(); lastHi=-1; setFill(0); const _pt=document.getElementById('ptime'); if(_pt)_pt.textContent='0:00';
+    stopLoop(); lastHi=-1; lastWordHi=-1; setFill(0); const _pt=document.getElementById('ptime'); if(_pt)_pt.textContent='0:00';
     const A=api();
     if(c.transcript){renderTranscript({name:c.name,dur:c.dur,turns:c.transcript.turns});show('transcript');return;}
     if(A&&c.output){A.open_call(c.output).then(d=>{if(d&&!d.error)renderTranscript({name:d.name,dur:c.dur,turns:d.turns});show('transcript');});return;}
