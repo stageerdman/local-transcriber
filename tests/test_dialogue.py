@@ -1,6 +1,7 @@
 from src.dialogue import (
     Segment,
     Word,
+    _join_words,
     blocks_to_dicts,
     format_timestamp,
     merge_segments_into_blocks,
@@ -229,3 +230,25 @@ def test_blocks_to_dicts_serializes_words_and_shape() -> None:
             "words": [{"start": 2.0, "end": 3.0, "text": "Hi!", "lead_space": True}],
         },
     ]
+
+
+def test_a_polished_jobs_turns_words_still_join_back_to_its_text() -> None:
+    """Reproduces the exact sequence app.worker._process runs on the polish
+    path: realign each block's words to the polished text BEFORE overwriting
+    block.text, then serialize - this is the regression Phase 5
+    (word-level-dialogue-blocks) exists to prevent: forgetting the realign
+    step (or realigning against the wrong text) would leave job.turns with
+    words that no longer match what the user actually reads."""
+    segments = [Segment("Person 1", 0.0, 1.0, "hey uh there", words=[
+        Word(0.0, 0.3, "hey", True), Word(0.3, 0.6, "uh", True), Word(0.6, 1.0, "there", True),
+    ])]
+    blocks = merge_segments_into_blocks(segments)
+    polished_texts = ["Hey there."]  # "uh" dropped, punctuation added - a real polish edit
+
+    for block, text in zip(blocks, polished_texts):
+        block.words = realign_words_to_text(block.words, text)
+        block.text = text
+
+    turns = blocks_to_dicts(blocks)
+    assert turns[0]["text"] == "Hey there."
+    assert _join_words([Word(**w) for w in turns[0]["words"]]) == turns[0]["text"]

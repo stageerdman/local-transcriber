@@ -141,12 +141,18 @@ within-block highlight, and the legacy/no-word-spans degraded case.
   with an empty list, same as any segment a backend couldn't supply words
   for._ **STATUS: done**
 
-- **Phase 5 — Worker wiring (`app/worker.py`, `app/jobs.py`).** Call
-  `realign_words_to_text` right after each polish `block.text = text`;
-  capture `job.turns = dialogue.blocks_to_dicts(blocks)` after final render.
-  _Tests: a polished job's `job.turns[i]["words"]` joins back to
-  `job.turns[i]["text"]` via `_join_words` — the actual regression this
-  phase exists to prevent._ **STATUS: not started**
+- **Phase 5 — Worker wiring (`app/worker.py`, `app/jobs.py`).** `Job` gains a
+  `turns: list[dict] | None` field. In the multi-track branch, each polished
+  block's words are realigned to the new text right before `block.text =
+  text`; `job.turns = dialogue.blocks_to_dicts(blocks)` is set unconditionally
+  after that branch's render (polished or not), so a non-polished job still
+  gets structured data - only single-track jobs (no blocks at all) leave
+  `job.turns` at its `None` default. _Tests:
+  `test_a_polished_jobs_turns_words_still_join_back_to_its_text`
+  (`tests/test_dialogue.py`) reproduces the worker's exact realign-then-render
+  sequence and confirms `job.turns[i]["words"]` joins back to
+  `job.turns[i]["text"]` via `_join_words` — the actual regression this phase
+  exists to prevent._ **STATUS: done**
 
 - **Phase 6 — History DB schema (`src/history_db.py`).** `turns_json`
   column + guarded `ALTER TABLE` migration (first one in this codebase —

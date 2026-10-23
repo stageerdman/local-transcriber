@@ -384,10 +384,12 @@ class TranscriptionWorker(threading.Thread):
                 if job.polish and blocks:
                     polished = self._polish_via_engine(job, [b.text for b in blocks], is_blocks=True)
                     for block, text in zip(blocks, polished):
+                        block.words = dialogue.realign_words_to_text(block.words, text)
                         block.text = text
                     transcript_text = dialogue.render_blocks_markdown(blocks)
                 else:
                     transcript_text = raw_transcript_text
+                job.turns = dialogue.blocks_to_dicts(blocks)
                 # A single selected track out of a multi-track container has
                 # nothing to diarize - `render_blocks_markdown` already
                 # collapses to plain text for one speaker, so keep the

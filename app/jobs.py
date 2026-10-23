@@ -57,6 +57,13 @@ class Job:
     elapsed_seconds: float | None = None
     output_path: Path | None = None
     error: str | None = None
+    # The just-finished multi-track job's dialogue blocks, word-level timing
+    # included (`dialogue.blocks_to_dicts`) - set right after the final
+    # render so the bridge can hand the UI real structured data instead of
+    # re-parsing the written `.md` (lossy, block-level only). `None` for
+    # single-track jobs (nothing to diarize) and anything that hasn't
+    # finished yet; the bridge falls back to the markdown parse in both cases.
+    turns: list[dict] | None = None
 
     # Populated lazily (on first UI expand of this job's row, or by the
     # worker if the row was never expanded before Start was clicked).
