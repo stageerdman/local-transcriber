@@ -1,6 +1,8 @@
-# Update: Transcription Quality Research — v1
+# Update: Transcription Quality Research — v1 (CLOSED)
 
-**Status: OPEN — build complete, pending real-app verify + commit (2026-10-01)**
+**Status: CLOSED (2026-10-23)** — build complete, user confirmed it works in
+real use. Originally "OPEN — build complete, pending real-app verify + commit
+(2026-10-01)".
 
 ## Goal
 Find the best *free, local, reasonably-fast* transcription setup for **Czech**

@@ -1,7 +1,9 @@
-# Update: Polishing Research — v1
+# Update: Polishing Research — v1 (CLOSED)
 
-**Status: OPEN — research complete; winner found, recommendation written; app
-change deferred to a future update (2026-10-09)**
+**Status: CLOSED (2026-10-23)** — core goal done and shipped to `main`
+(commit `5b13d27`); user confirmed it works. Remaining optional follow-ups
+(ensemble mode, chunk-size revisit, confidence-gated correction) carried in
+`issues.txt`, not blocking this close.
 
 ## TL;DR
 Best polishing approach = **minimal-edit Czech prompt + moderate small-batch

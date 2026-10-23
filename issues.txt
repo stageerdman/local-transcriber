@@ -35,7 +35,7 @@
       progress bar update more often (and are more memory-safe) at some extra
       overlap recompute. A knob to revisit if the bar's jumps feel too coarse.
 
-- [ ] Web-UI rewrite (updates/2026-10-04 web-ui-rewrite - OPEN/): new pywebview
+- [ ] Web-UI rewrite (updates/2026-10-04 web-ui-rewrite - CLOSED/): new pywebview
       app is the default (`python -m app.main`; Tkinter fallback `app.main_tk`).
       Core loop works; remaining before closing the update:
         * Full real-app GUI transcribe-to-completion not yet confirmed end-to-end.
@@ -49,7 +49,7 @@
           (app/main_tk.py, app/ui.py) once confident; prune dead prototype CSS.
       See the update's "▶ RESUME HERE" for the full picture.
 
-- [ ] Polishing quality (updates/2026-10-09 polishing-research - OPEN/): the
+- [ ] Polishing quality (updates/2026-10-09 polishing-research - CLOSED/): the
       benchmark winner is SHIPPED in src/polish.py (minimal-edit prompt +
       ~5-turn batches; beat the old prompt on readability AND faithfulness, no
       fabrication). Optional, not yet done:

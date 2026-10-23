@@ -1,6 +1,8 @@
-# Web-UI rewrite — update v1 (OPEN)
+# Web-UI rewrite — update v1 (CLOSED)
 
-**Status: OPEN — building (Phases 1–4 + playback/export/cutover shipped; Fix-speakers override + drag-drop remain; pending full real-app verify)**
+**Status: CLOSED (2026-10-23)** — user confirmed it works in real use.
+Originally "OPEN — building (Phases 1–4 + playback/export/cutover shipped;
+Fix-speakers override + drag-drop remain; pending full real-app verify)".
 
 ## Goal
 Replace the Tkinter UI with a from-scratch, beautiful native front-end — the
@@ -111,3 +113,9 @@ runs); several rounds of real-run bug reports have been fixed.
 
 All code committed on `main`. If GitHub was unreachable at pause time, push when
 back online.
+
+## 2026-10-23 — Closed
+User confirmed in real use: it works. Closing. Items 2-6 above (fix-speakers
+re-run, per-person language, multi-file batch, Tkinter retirement, dead CSS)
+were not done this session — carried to `issues.txt` as optional follow-ups
+rather than blocking this close.

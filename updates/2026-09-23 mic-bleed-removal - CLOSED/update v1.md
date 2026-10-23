@@ -1,4 +1,4 @@
-# Mic-bleed removal for multi-track recordings — update v1 (OPEN)
+# Mic-bleed removal for multi-track recordings — update v1 (CLOSED)
 
 ## Goal
 Multi-track recordings often have **bleed** (a.k.a. crosstalk / spill): when
@@ -314,3 +314,6 @@ isolate→salesperson only, keep→client only, **0 cross-speaker duplicates**.
 
 **Still open (CLOSE-gate):** one full-length run in the actual app on the Petr
 Sochůrek call to confirm the whole file comes out clean, then flip to CLOSED.
+
+## 2026-10-23 — Closed
+User confirmed in real use: it works. Closing.
