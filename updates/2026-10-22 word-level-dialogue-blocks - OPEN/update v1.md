@@ -131,11 +131,15 @@ within-block highlight, and the legacy/no-word-spans degraded case.
   an IP allowlist on the API key, verified via the installed SDK's pydantic
   model instead - see wiki.md).
 
-- **Phase 4 — Resumability (`src/job_store.py`, `app/worker.py`).**
+- **Phase 4 — Resumability (`app/worker.py`).** `src/job_store.py` needed no
+  changes - its segment log is schema-agnostic JSON lines, so a new `words`
+  key just rides along. Added `dialogue.word_to_dict`/`word_from_dict` (also
+  refactored `blocks_to_dicts` onto `word_to_dict` - one shape, one place).
   `_persist_chunk` serializes `seg.words`; `_restore_unit` reconstructs them,
-  `r.get("words") or []` guarding old in-flight checkpoints. _Tests: resume
-  round-trip preserves words; old-shaped row still restores via the Phase 1
-  synthetic fallback._ **STATUS: not started**
+  `r.get("words") or []` guarding old-shaped checkpoint rows. _Tests: resume
+  round-trip preserves words; old-shaped row (no `words` key) still restores
+  with an empty list, same as any segment a backend couldn't supply words
+  for._ **STATUS: done**
 
 - **Phase 5 — Worker wiring (`app/worker.py`, `app/jobs.py`).** Call
   `realign_words_to_text` right after each polish `block.text = text`;

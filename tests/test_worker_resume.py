@@ -14,6 +14,7 @@ import pytest
 
 from app.worker import TranscriptionWorker
 from src import dialogue, job_store
+from src.dialogue import Word
 from src.transcription import TranscribedSegment
 
 
@@ -119,3 +120,35 @@ def test_restore_uses_label_when_segment_has_no_speaker() -> None:
     job_store.save(cp)
     restored = w._restore_unit("track0", "Bob")
     assert restored[0].speaker == "Bob"
+
+
+def test_resume_round_trip_preserves_word_level_timing() -> None:
+    w = _worker()
+    cp = job_store.Checkpoint(key="words", config={}, status="running")
+    w._cp = cp
+    w._unit, w._unit_speaker, w._unit_track_pcm = "single", None, None
+
+    seg = TranscribedSegment(
+        start=0.0, end=1.0, text="hi there",
+        words=[Word(0.0, 0.4, "hi", True), Word(0.4, 1.0, "there", True)],
+    )
+    w._persist_chunk("single", 0, [seg])
+    w._finish_unit("single")
+
+    restored = w._restore_unit("single", None)
+    assert [wd.text for wd in restored[0].words] == ["hi", "there"]
+    assert restored[0].words[0].start == 0.0 and restored[0].words[1].end == 1.0
+
+
+def test_old_shaped_checkpoint_row_with_no_words_key_still_restores() -> None:
+    # Simulates a checkpoint written before the `words` field existed.
+    w = _worker()
+    cp = job_store.Checkpoint(key="legacy", config={}, status="running")
+    w._cp = cp
+    job_store.append_segments("legacy", "single", 0, [{"start": 0, "end": 1, "text": "x"}])
+    cp.completed_units = ["single"]
+    job_store.save(cp)
+
+    restored = w._restore_unit("single", None)
+    assert restored[0].text == "x"
+    assert restored[0].words == []

@@ -185,7 +185,10 @@ class TranscriptionWorker(threading.Thread):
         cp = self._cp
         rows = []
         for seg in segments:
-            row = {"start": seg.start, "end": seg.end, "text": seg.text}
+            row = {
+                "start": seg.start, "end": seg.end, "text": seg.text,
+                "words": [dialogue.word_to_dict(w) for w in seg.words],
+            }
             if self._unit_speaker is not None:
                 row["speaker"] = self._unit_speaker
             if self._unit_track_pcm is not None:
@@ -207,14 +210,26 @@ class TranscriptionWorker(threading.Thread):
         job_store.save(cp)
 
     def _restore_unit(self, unit: str, speaker: str | None) -> list:
-        """Rebuild a unit's segment objects from the persisted log."""
+        """Rebuild a unit's segment objects from the persisted log.
+
+        `r.get("words") or []` guards checkpoints written before this field
+        existed - they restore with no words, same as a fresh segment a
+        backend couldn't supply any for (`dialogue._words_for_segment`'s
+        synthetic fallback covers it downstream)."""
         rows = job_store.segments_for_unit(self._cp, unit)
         if speaker is None:
-            return [TranscribedSegment(start=r["start"], end=r["end"], text=r["text"]) for r in rows]
+            return [
+                TranscribedSegment(
+                    start=r["start"], end=r["end"], text=r["text"],
+                    words=[dialogue.word_from_dict(w) for w in (r.get("words") or [])],
+                )
+                for r in rows
+            ]
         return [
             dialogue.Segment(
                 speaker=r.get("speaker") or speaker,
                 start=r["start"], end=r["end"], text=r["text"], energy=r.get("energy"),
+                words=[dialogue.word_from_dict(w) for w in (r.get("words") or [])],
             )
             for r in rows
         ]

@@ -385,7 +385,18 @@ def realign_words_to_text(words: list[Word], new_text: str) -> list[Word]:
     return out  # type: ignore[return-value]  # every slot filled above
 
 
-# --- serialization for the UI / history --------------------------------------
+# --- serialization for the UI / history / checkpoint persistence -------------
+
+
+def word_to_dict(w: Word) -> dict:
+    """Plain-dict (JSON-ready) form of one `Word` - shared by the UI/history
+    payload (`blocks_to_dicts`) and checkpoint persistence (`app.worker`), so
+    there's exactly one `Word`<->dict shape across this codebase."""
+    return {"start": w.start, "end": w.end, "text": w.text, "lead_space": w.lead_space}
+
+
+def word_from_dict(d: dict) -> Word:
+    return Word(start=d["start"], end=d["end"], text=d["text"], lead_space=d.get("lead_space", True))
 
 
 def blocks_to_dicts(blocks: list[Block]) -> list[dict]:
@@ -400,10 +411,7 @@ def blocks_to_dicts(blocks: list[Block]) -> list[dict]:
             "end": b.end,
             "interrupting": b.interrupting,
             "text": b.text,
-            "words": [
-                {"start": w.start, "end": w.end, "text": w.text, "lead_space": w.lead_space}
-                for w in b.words
-            ],
+            "words": [word_to_dict(w) for w in b.words],
         }
         for b in blocks
     ]
