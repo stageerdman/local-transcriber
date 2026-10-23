@@ -7,3 +7,4 @@ pytest>=8.0.0
 tkinterdnd2>=0.4.2
 pywebview>=6.2    # native WebKit window for the new web UI (app/webview_main.py)
 groq>=0.11.0      # Cloud quality tier - hosted Whisper API, src/transcription.py
+elevenlabs>=2.74.0  # Cloud quality tier - Scribe v2 API, src/transcription.py

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.transcription import CZECH_FT_ID, GROQ_ID
+from src.transcription import CZECH_FT_ID, ELEVENLABS_ID, GROQ_ID
 
 # (display label, model id)
 # Czech-finetuned large-v3 (run with Silero VAD) is the default: it won a blind
@@ -10,6 +10,7 @@ from src.transcription import CZECH_FT_ID, GROQ_ID
 MODEL_CHOICES: list[tuple[str, str]] = [
     ("Czech - finetuned large-v3, best quality (default)", CZECH_FT_ID),
     ("Cloud - Groq Whisper large-v3-turbo, fastest (needs internet)", GROQ_ID),
+    ("Cloud - ElevenLabs Scribe v2, best Czech accuracy (needs internet)", ELEVENLABS_ID),
     ("Parakeet TDT v3 - fastest, robust", "mlx-community/parakeet-tdt-0.6b-v3"),
     ("Whisper large-v3 - multilingual", "mlx-community/whisper-large-v3-mlx"),
     ("Whisper large-v3-turbo - fast + accurate", "mlx-community/whisper-large-v3-turbo"),
@@ -64,6 +65,11 @@ DEFAULT_REAL_TIME_FACTOR: dict[str, float] = {
     # (25-35x realtime, including network) in the transcription-quality-
     # research update's benchmarking.
     GROQ_ID: 0.03,
+    # Placeholder, not yet benchmarked (ElevenLabs was only just added - see
+    # the cloud-model-research spike). Ordinary cloud GPU inference rather
+    # than Groq's LPUs, so assumed meaningfully slower than Groq but still
+    # well under realtime; revisit once a real call has run through it.
+    ELEVENLABS_ID: 0.15,
 }
 FALLBACK_REAL_TIME_FACTOR = 0.35
 

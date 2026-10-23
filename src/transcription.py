@@ -66,6 +66,22 @@ def _is_groq_model(model_name: str) -> bool:
     return model_name.startswith(GROQ_MODEL_PREFIX)
 
 
+# Cloud backend #2: ElevenLabs' Scribe v2 - a different model, not just a
+# different host, and markedly better on Czech than stock Whisper (3-5% WER
+# on FLEURS/Common Voice Czech vs. Whisper-class scoring far worse - see the
+# cloud-model-research spike in this update's wiki). Kept alongside Groq, not
+# swapped in for it, so cost/speed (Groq) and Czech accuracy (ElevenLabs) are
+# each one click away.
+ELEVENLABS_MODEL_PREFIX = "elevenlabs:"
+
+
+def _is_elevenlabs_model(model_name: str) -> bool:
+    return model_name.startswith(ELEVENLABS_MODEL_PREFIX)
+
+
+ELEVENLABS_ID = f"{ELEVENLABS_MODEL_PREFIX}scribe_v2"
+
+
 # The Cloud quality tier's one model choice. large-v3-turbo over plain
 # large-v3: in blind-ish comparison on real Czech call audio (the
 # transcription-quality-research update), turbo didn't show large-v3's
@@ -160,7 +176,7 @@ def ensure_model_loaded(model_name: str) -> None:
             pass
         return
 
-    if _is_groq_model(model_name):
+    if _is_groq_model(model_name) or _is_elevenlabs_model(model_name):
         return  # nothing to preload - each call is a fresh API request
 
     try:
@@ -218,6 +234,9 @@ def transcribe_mp3_segments(
 
     if _is_groq_model(model_name):
         return _transcribe_with_groq(model_name, audio_path, language, progress_callback, chunk_sink)
+
+    if _is_elevenlabs_model(model_name):
+        return _transcribe_with_elevenlabs(model_name, audio_path, language, progress_callback, chunk_sink)
 
     repo = _resolve_model(model_name)
     if use_vad:
@@ -515,6 +534,109 @@ def _transcribe_with_groq(
         text = (get("text") or "").strip()
         if text:
             segments.append(TranscribedSegment(start=float(get("start")), end=float(get("end")), text=text))
+
+    if progress_callback is not None:
+        progress_callback(1.0)
+    if chunk_sink is not None:
+        chunk_sink(0, segments)
+    return segments
+
+
+# ElevenLabs returns only a flat per-word stream (no sentence/segment grouping
+# like Whisper/Groq give), so this reconstructs segments the `dialogue`
+# pipeline can consume: a new segment starts on a pause longer than this gap,
+# or right after sentence-ending punctuation. The gap is kept just under
+# `dialogue.DEFAULT_PAUSE_SECONDS` (0.8s) so one speaker's natural mid-sentence
+# breath still gets re-merged into a single block downstream instead of
+# staying split into two.
+_ELEVENLABS_SEGMENT_GAP_SECONDS = 0.6
+
+
+def _coalesce_elevenlabs_words(words: list[Any]) -> list[TranscribedSegment]:
+    segments: list[TranscribedSegment] = []
+    texts: list[str] = []
+    seg_start: float | None = None
+    seg_end: float | None = None
+    for w in words:
+        if getattr(w, "type", None) != "word" or w.start is None or w.end is None:
+            continue
+        if seg_end is not None and (
+            w.start - seg_end > _ELEVENLABS_SEGMENT_GAP_SECONDS
+            or texts[-1].rstrip().endswith((".", "!", "?"))
+        ):
+            segments.append(TranscribedSegment(start=seg_start, end=seg_end, text=" ".join(texts).strip()))
+            texts = []
+            seg_start = None
+        if seg_start is None:
+            seg_start = w.start
+        texts.append(w.text)
+        seg_end = w.end
+    if texts:
+        segments.append(TranscribedSegment(start=seg_start, end=seg_end, text=" ".join(texts).strip()))
+    return segments
+
+
+def _transcribe_with_elevenlabs(
+    model_name: str,
+    audio_path: Path,
+    language: str | None,
+    progress_callback: ProgressCallback | None = None,
+    chunk_sink: ChunkSink | None = None,
+) -> list[TranscribedSegment]:
+    """Transcribe via ElevenLabs' hosted Scribe API (one HTTP call, whole file).
+
+    Needs `ELEVENLABS_API_KEY` in the environment (same `.env` loading as
+    Groq's key). Scribe's 5GB upload limit is generous enough that, unlike
+    Groq, the source file is sent as-is - no re-encode/compaction pass needed.
+
+    Shaped like `_transcribe_with_groq`: one blocking call, the whole result
+    lands as chunk 0, `progress_callback` fires once at completion.
+    """
+    api_key = os.environ.get("ELEVENLABS_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "Cloud transcription isn't set up - missing API key. Switch to "
+            "Faster or Best to transcribe this one on-device. (To enable "
+            "ElevenLabs Cloud, add ELEVENLABS_API_KEY to .env - get one at "
+            "elevenlabs.io.)"
+        )
+    try:
+        from elevenlabs import ElevenLabs
+    except ImportError as exc:
+        raise RuntimeError(
+            "elevenlabs is not installed. Run: pip install -r requirements.txt"
+        ) from exc
+
+    eleven_model = model_name[len(ELEVENLABS_MODEL_PREFIX):]
+    client = ElevenLabs(api_key=api_key)
+    kwargs: dict[str, Any] = {"model_id": eleven_model, "timestamps_granularity": "word"}
+    if language:
+        kwargs["language_code"] = language
+
+    try:
+        with open(audio_path, "rb") as f:
+            result = client.speech_to_text.convert(file=f, **kwargs)
+    except Exception as exc:  # noqa: BLE001 - re-raised with user-facing copy
+        message = str(exc).lower()
+        # Same reasoning as Groq's handler above: the underlying message is
+        # always appended, never swallowed.
+        if "413" in message or "too large" in message or "payload" in message:
+            raise RuntimeError(
+                "This call is too long for Cloud - over ElevenLabs' upload "
+                f"limit. Use Faster or Best for this one. ({exc})"
+            ) from exc
+        if "connection" in message or "timed out" in message or "network" in message:
+            raise RuntimeError(
+                "No internet connection - Cloud needs one. Switch to Faster or "
+                f"Best to keep working offline. ({exc})"
+            ) from exc
+        raise RuntimeError(
+            "Cloud transcription failed on ElevenLabs' end. Try again in a "
+            f"moment, or switch to Faster or Best. ({exc})"
+        ) from exc
+
+    words = getattr(result, "words", None) or []
+    segments = _coalesce_elevenlabs_words(words)
 
     if progress_callback is not None:
         progress_callback(1.0)

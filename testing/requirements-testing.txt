@@ -5,3 +5,4 @@
 
 silicon-asr   # Apple Neural Engine (CoreML) Parakeet runners
 groq          # Groq API client (Whisper Large-v3 / Large-v3-turbo on Groq's LPUs)
+elevenlabs    # ElevenLabs API client (Scribe v2)

@@ -134,6 +134,43 @@ def _make_groq_backend(model_name: str, label: str) -> TranscriptionBackend:
     return TranscriptionBackend(id=f"groq-{model_name}", label=label, engine="groq-api", run=run)
 
 
+def _make_elevenlabs_backend(model_id: str, label: str) -> TranscriptionBackend:
+    """ElevenLabs' Scribe models - a different model from Whisper, not just a
+    different host, and benchmarked (see the cloud-model-research spike) as
+    markedly better on Czech. Mirrors `_make_groq_backend`'s shape so the two
+    cloud options are directly comparable in the rating UI.
+
+    Requires `pip install elevenlabs` and an ELEVENLABS_API_KEY environment
+    variable. No local model to load, so load_seconds is always 0.
+    """
+
+    def run(audio_path: Path, language: str | None) -> TranscribeResult:
+        try:
+            from elevenlabs import ElevenLabs
+        except ImportError as exc:
+            raise RuntimeError(
+                "elevenlabs is not installed. Run: pip install -r requirements-testing.txt"
+            ) from exc
+
+        api_key = os.environ.get("ELEVENLABS_API_KEY")
+        if not api_key:
+            raise RuntimeError("ELEVENLABS_API_KEY environment variable is not set.")
+
+        client = ElevenLabs(api_key=api_key)
+        kwargs: dict = {"model_id": model_id}
+        if language:
+            kwargs["language_code"] = language
+
+        transcribe_start = time.perf_counter()
+        with open(audio_path, "rb") as f:
+            result = client.speech_to_text.convert(file=f, **kwargs)
+        transcribe_seconds = time.perf_counter() - transcribe_start
+
+        return TranscribeResult(text=result.text, load_seconds=0.0, transcribe_seconds=transcribe_seconds)
+
+    return TranscriptionBackend(id=f"elevenlabs-{model_id}", label=label, engine="elevenlabs-api", run=run)
+
+
 # Same models already offered in local-transcriber/src/catalog.py's
 # MODEL_CHOICES, plus a couple of other "ways" to run comparable models:
 # silicon-asr (same Parakeet weights, but on the Apple Neural Engine instead
@@ -154,6 +191,7 @@ BACKENDS: list[TranscriptionBackend] = [
     _make_silicon_asr_backend("parakeet-ctc-coreml", "Parakeet CTC 110M (CoreML, ANE)"),
     _make_groq_backend("whisper-large-v3", "Whisper Large-v3 (Groq API)"),
     _make_groq_backend("whisper-large-v3-turbo", "Whisper Large-v3-turbo (Groq API)"),
+    _make_elevenlabs_backend("scribe_v2", "Scribe v2 (ElevenLabs API)"),
 ]
 
 BACKENDS_BY_ID: dict[str, TranscriptionBackend] = {b.id: b for b in BACKENDS}
